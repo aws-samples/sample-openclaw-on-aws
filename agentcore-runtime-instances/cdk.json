@@ -1,0 +1,7 @@
+{
+  "app": "python3 app.py",
+  "context": {
+    "region": "us-east-1",
+    "@aws-cdk/core:defaultCrossStackReferences": "strong"
+  }
+}

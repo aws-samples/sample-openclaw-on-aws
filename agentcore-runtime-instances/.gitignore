@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# CDK
+cdk.out/
+.cdk.staging/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (from npx cdk)
+node_modules/
+package-lock.json
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Terraform (in case of migration)
+.terraform/
+*.tfstate*

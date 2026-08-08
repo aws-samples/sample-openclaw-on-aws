@@ -1,0 +1,17 @@
+[project]
+name = "openclaw-agentcore-wrapper"
+version = "0.1.0"
+description = "AgentCore SDK wrapper bridging AgentCore Runtime protocol to OpenClaw gateway HTTP endpoint"
+requires-python = ">=3.11"
+dependencies = [
+    "bedrock-agentcore>=1.21.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.4.0",
+]
+
+[tool.setuptools]
+py-modules = []
