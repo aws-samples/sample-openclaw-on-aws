@@ -61,7 +61,7 @@ Subsequent messages while instance is warm: 5-15s.
 
 ### Configuration
 
-- `idleRuntimeSessionTimeout: 900` (15 min) — recommended for cost efficiency
+- `idleRuntimeSessionTimeout: 14400` (4 hours) — rolling window: resets on every `invoke-agent-runtime` call, not fixed from first activity. Instance stays warm as long as a message arrives at least once within the window; a gap longer than the timeout triggers a cold start on the next message.
 - Container runs in **webhook-only mode** (no `CHANNEL_SECRETS_ARN`)
 - Lambda handles all channel I/O externally
 
@@ -150,7 +150,7 @@ Configure `S3_BACKUP_BUCKET` environment variable so the workspace (including cr
 ```json
 {
   "lifecycleConfiguration": {
-    "idleRuntimeSessionTimeout": 900,   // seconds before auto-stop (default: 15 min)
+    "idleRuntimeSessionTimeout": 14400,  // seconds before auto-stop (default: 4 hours, rolling window)
     "maxLifetime": 28800                // max session duration (default: 8 hours, max: 14 days)
   }
 }
@@ -162,6 +162,6 @@ These are set on the agent runtime via `create-agent-runtime` or `update-agent-r
 
 | Use case | idleRuntimeSessionTimeout | maxLifetime | Notes |
 |----------|--------------------------|-------------|-------|
-| Lambda router (recommended) | 900 (15 min) | 1209600 (14 days) | Zero cost when idle, ~90s wake |
+| Lambda router (recommended) | 14400 (4 hours) | 1209600 (14 days) | Rolling window — resets per message; ~90s wake after a 4h+ gap |
 | Frequent messaging | 3600 (1 hour) | 86400 (24 hours) | Fewer cold starts |
 | Always-on (no cold starts) | 86400 (24 hours) | 1209600 (14 days) | Higher cost, instant responses |

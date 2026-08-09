@@ -111,7 +111,7 @@ cold-start time.
 
 ### Warm instance behaviour
 
-When the instance is already running (message within the 15-min idle
+When the instance is already running (message within the 4-hour rolling idle
 timeout):
 - DynamoDB shows recent success → no "⏳ Waking up" message shown, just typing indicator
 - `invoke_agent_runtime` routes immediately to the running container
@@ -216,6 +216,6 @@ Lambda role requires:
 | "Sorry, the instance failed to respond" | All retry attempts (~255s) exhausted — cold start took longer than the window | Message again; instance is now warm from the attempt |
 | No response at all | Webhook not set, or something is polling `getUpdates` and clearing it | Check `getWebhookInfo`; ensure container has no `channels.telegram` in its persisted config (see below) |
 | 403 on webhook | Secret token mismatch | Verify `WEBHOOK_SECRET_TOKEN` matches setWebhook |
-| First response after idle takes ~90s | Instance cold-starting (expected, not a bug) | Normal for first message after 15-min idle; see Cold-Start Behaviour above |
+| First response after idle takes ~90s | Instance cold-starting (expected, not a bug) | Normal for first message after a 4h+ gap; see Cold-Start Behaviour above |
 | DynamoDB error in logs | Table missing or IAM insufficient | Create table; check IAM policy |
 | Webhook silently disappears | Container's own Telegram channel config got restored/re-synced from EBS/S3 and started polling | Strip `channels` from persisted `openclaw.json`; container's `_strip_channels_for_webhook_mode()` (main.py) does this on every boot when `CHANNEL_SECRETS_ARN` is unset |

@@ -43,7 +43,7 @@ User message → Channel webhook → Lambda → invoke-agent-runtime (wakes inst
 - **Async self-invoke pattern** — webhook handler returns 200 in <2s, fires worker async. Handles API Gateway 30s limit + Telegram 60s webhook timeout + AgentCore cold starts (variable, see below).
 - **Cold-start UX** — DynamoDB tracks last invocation; if idle timeout exceeded, sends "⏳ Waking up..." status message, edits with real response when ready.
 - **Multi-channel** — same Lambda handles Telegram, Discord, Slack via channel adapters. AgentCore invocation is channel-agnostic.
-- **15-min idle timeout** — `idleRuntimeSessionTimeout: 900`. Instance shuts down fast for cost savings, wakes on demand. Zero cost when idle.
+- **4-hour rolling idle timeout** — `idleRuntimeSessionTimeout: 14400`. Resets on every message, not fixed from first activity. Instance stays warm across active-use sessions; a silent gap longer than 4h triggers the next message to cold-start.
 
 **Implementation detail:**
 `invoke_agent_runtime`'s streamed payload is returned under the boto3 response key **`"response"`** (a `StreamingBody`), not `"body"`. Using the wrong key makes every call silently return nothing regardless of success — no exception is raised, so a response-parsing bug can look like a timing/reliability problem. Verify the actual key by inspecting `resp.keys()` directly rather than assuming the SDK's shape from memory.
