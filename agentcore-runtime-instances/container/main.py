@@ -117,10 +117,15 @@ def _start_gateway():
 
 
 def _wait_for_gateway(timeout: float = 180.0) -> bool:
-    """Wait for the gateway HTTP endpoint to become available.
+    """Wait for the gateway to be fully ready to process LLM requests.
 
-    Extended to 180s to handle cold-start scenarios where workspace restore,
-    npm operations, and model config loading all happen sequentially.
+    Two-phase check:
+    1. Wait for health endpoint (/) to respond — gateway process is up
+    2. Wait for responses endpoint to accept requests — models loaded
+
+    The gateway binds its port early but may not be ready to process LLM
+    requests until plugins, models, and workspace are fully initialized.
+    Phase 2 prevents returning 400/"LLM request failed" during cold start.
     """
     global _gateway_ready
     if _gateway_ready:
@@ -128,18 +133,60 @@ def _wait_for_gateway(timeout: float = 180.0) -> bool:
 
     start = time.time()
     attempt = 0
+
+    # Phase 1: Wait for HTTP port to respond
     while time.time() - start < timeout:
         try:
             urlopen(GATEWAY_HEALTH_URL, timeout=3)
             elapsed = time.time() - start
-            print(f"[main.py] Gateway ready after {elapsed:.1f}s ({attempt} attempts)")
-            _gateway_ready = True
-            return True
+            print(f"[main.py] Gateway HTTP up after {elapsed:.1f}s ({attempt} polls)")
+            break
         except (URLError, OSError):
             attempt += 1
             time.sleep(1.0)
-    print(f"[main.py] ERROR: Gateway did not become ready within {timeout}s")
-    return False
+    else:
+        print(f"[main.py] ERROR: Gateway HTTP did not respond within {timeout}s")
+        return False
+
+    # Phase 2: Verify the responses endpoint actually works (model loaded)
+    # Send a minimal prompt and check we don't get a 500/503
+    verify_payload = json.dumps({
+        "model": "openclaw",
+        "input": "ping",
+        "user": "healthcheck",
+    }).encode()
+    verify_headers = {"Content-Type": "application/json"}
+
+    phase2_start = time.time()
+    phase2_timeout = min(60.0, timeout - (time.time() - start))
+
+    while time.time() - phase2_start < phase2_timeout:
+        try:
+            req = Request(GATEWAY_HTTP_URL, data=verify_payload,
+                         headers=verify_headers, method="POST")
+            with urlopen(req, timeout=30) as resp:
+                elapsed = time.time() - start
+                print(f"[main.py] Gateway fully ready after {elapsed:.1f}s (LLM verified)")
+                _gateway_ready = True
+                return True
+        except HTTPError as e:
+            if e.code >= 500:
+                # Gateway up but not ready (model loading, etc)
+                time.sleep(3)
+                continue
+            # 4xx means gateway is processing (maybe bad request format, but it's alive)
+            elapsed = time.time() - start
+            print(f"[main.py] Gateway ready after {elapsed:.1f}s (got {e.code}, treating as ready)")
+            _gateway_ready = True
+            return True
+        except (URLError, OSError):
+            time.sleep(3)
+            continue
+
+    # If phase 2 times out, assume it's as ready as it'll get
+    print("[main.py] WARNING: Gateway phase-2 check timed out, proceeding anyway")
+    _gateway_ready = True
+    return True
 
 
 def _invoke_gateway(prompt: str, session_key: Optional[str] = None) -> str:

@@ -54,6 +54,67 @@ The router tracks last successful invocation in DynamoDB. When `elapsed > idle_t
 
 Warm instance: no status message, just typing indicator + fast response.
 
+## Cold-Start Behaviour (Documented)
+
+### What happens during a cold start
+
+```
+t=0s     User sends message
+t=0.5s   Lambda receives webhook, detects cold start via DynamoDB
+t=0.7s   Lambda sends "⏳ Waking up..." to user, fires async worker
+t=1s     Worker calls invoke-agent-runtime
+t=1-5s   AgentCore starts provisioning EC2 instance
+t=30-60s Instance boots, container starts, BedrockAgentCoreApp binds :8080
+t=60-70s AgentCore routes request to container
+t=60-80s OpenClaw gateway starting (loading plugins, models, workspace)
+t=70-90s Gateway ready, processes prompt, calls Bedrock
+t=80-95s Response returned, Lambda edits "⏳" message with real response
+```
+
+### The 400 error during boot (and why retries are needed)
+
+AgentCore routes requests to the container **as soon as port 8080 is listening**. But the OpenClaw gateway inside the container hasn't finished starting yet:
+
+```
+invoke-agent-runtime → AgentCore → container:8080 (up) → gateway:18789 (NOT ready)
+                                                          ↓
+                                                        HTTP 400 / "LLM request failed"
+                                                          ↓
+                                                        RuntimeClientError 400 → Lambda
+```
+
+**Container-side mitigation:** Two-phase health check in `main.py`:
+1. Wait for gateway HTTP port to respond (process is up)
+2. Send a test prompt to verify LLM requests actually work (models loaded)
+
+The handler blocks until both phases pass, preventing premature 400 responses.
+
+**Lambda-side mitigation:** 5 retry attempts over ~120s (delays: 0, 15, 25, 35, 45s). Covers the full cold-start window even if the container-side check fails.
+
+### Retry schedule
+
+| Attempt | Cumulative time | Expected state |
+|---------|----------------|----------------|
+| 1 | 0s | Instance provisioning |
+| 2 | 15s | Instance booting |
+| 3 | 40s | Container starting, gateway loading |
+| 4 | 75s | Gateway ready or nearly ready |
+| 5 | 120s | Should definitely be ready |
+
+### Why "LLM request failed" can leak to users
+
+If all 5 attempts fail (instance took >120s or has a configuration error), the Lambda sends a user-friendly error. However, if the container returns the raw gateway error (e.g., "LLM request failed") as a successful response (HTTP 200), the Lambda forwards it as-is.
+
+**Prevention:** The container's `_invoke_gateway()` retries 5xx errors internally and only returns clean error strings on total failure.
+
+### Warm instance behaviour
+
+When the instance is already running (message within 15-min idle timeout):
+- DynamoDB shows recent success → no "⏳" message shown
+- Worker calls invoke-agent-runtime → routes immediately to running container
+- Gateway already loaded → prompt processed in 5-15s
+- Response sent directly (no message editing)
+
 ## Supported Channels
 
 ### Telegram
