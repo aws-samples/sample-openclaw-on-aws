@@ -116,6 +116,23 @@ The container runs in **webhook-only mode** by default (no `CHANNEL_SECRETS_ARN`
 
 If `CHANNEL_SECRETS_ARN` is set, the container falls back to legacy polling mode.
 
+## Cold-Start Detection (DynamoDB)
+
+The router uses a single-item DynamoDB table (`OpenClaw-RouterColdStart`) to track when the last successful AgentCore invocation occurred.
+
+**How it works:**
+1. On each successful response, the worker writes `{session_id, last_success_epoch}` to DynamoDB
+2. On each incoming webhook, the handler reads the item and checks: `now - last_success > idle_timeout?`
+3. If yes → instance is likely cold → send immediate status message to user
+4. If no → instance is warm → just show typing indicator
+
+**Table schema:**
+- Partition key: `session_id` (String)
+- Attributes: `last_success_epoch` (Number, Unix timestamp)
+- Billing: on-demand (PAY_PER_REQUEST) — effectively free for personal use
+
+Without the table, the router assumes every request might be a cold start (still works, just shows the status message unnecessarily).
+
 ## IAM Permissions
 
 Lambda role requires:
