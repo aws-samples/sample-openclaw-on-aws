@@ -63,16 +63,37 @@ The EBS root volume (defined in the capacity provider) persists across session s
 - **Final sync on SIGTERM:** When AgentCore stops the session, a final sync ensures S3 is up-to-date.
 - **S3 restore (rare):** Only triggered when the workspace directory is empty — which only happens if the 14-day session TTL expires and the EBS volume is reclaimed.
 
-## How Channels Work (No Lambda Required)
+## How Channels Work
 
-Unlike the microVM approach which needs a Router Lambda to wake containers, Runtime Instances runs a persistent OpenClaw gateway that handles channels natively:
+Two patterns are available for connecting messaging channels, with different
+tradeoffs around idle-stop behavior:
+
+### Lambda Router (recommended)
+
+An external Lambda receives channel webhooks (Telegram, Discord, Slack),
+calls `invoke-agent-runtime` to wake the instance on demand, and replies
+directly. This is what makes idle-stop actually work end-to-end: a stopped
+instance cannot poll or maintain an outbound WebSocket connection, so
+something outside the instance has to receive the inbound message and
+trigger the wake. See [Channel Router docs](CHANNEL_ROUTER.md) for the full
+architecture, supported channels, and deployment steps.
+
+### Direct polling (legacy, requires an always-on instance)
+
+The OpenClaw gateway can also connect to channels directly from inside the
+container:
 
 - **Telegram**: Long-polling (outbound connection, no webhook URL needed)
 - **Discord**: WebSocket bot connection (outbound)
 - **WhatsApp**: WhatsApp Web pairing (outbound)
 - **Slack**: Socket Mode (outbound WebSocket, no public URL needed)
 
-The gateway stays running for the session lifetime (up to 14 days). No inbound webhooks, no API Gateway, no public IP required.
+This works only while the gateway process is running. Once the instance
+auto-stops on idle, all of these connections drop, and there is no way for
+an inbound message to wake the instance — `invoke-agent-runtime` is the only
+API that triggers a cold start, and none of these channels call it. Use this
+pattern only if you set a high `idleRuntimeSessionTimeout` (or none) so the
+instance effectively stays on.
 
 ## Why Runtime Instances?
 
@@ -85,7 +106,7 @@ The gateway stays running for the session lifetime (up to 14 days). No inbound w
 | GPU support | Manual setup | ❌ | ✅ |
 | Patching/lifecycle | You manage | AWS managed | **AWS managed** |
 | Auto-stop on idle | Manual implementation | N/A (ephemeral) | **Built-in (idleInstanceTimeout)** |
-| Auto-resume | N/A | N/A | **Automatic on next invocation** |
+| Auto-resume | N/A | N/A | **Automatic on next `invoke-agent-runtime` call** (see [Channel Router](CHANNEL_ROUTER.md) for how inbound channel messages trigger this) |
 | Multi-agent | Manual | ❌ | ✅ (shared session) |
 | Cost model | EC2 on-demand | Pay-per-use | EC2 in your account (Savings Plans apply) |
 
@@ -96,7 +117,7 @@ Running OpenClaw on a self-managed EC2 instance works, but AgentCore Instances a
 | Capability | Plain EC2 | AgentCore Instances |
 |-----------|-----------|---------------------|
 | **Auto-stop on idle** | DIY (cron + CloudWatch) | Built-in `idleInstanceTimeout` |
-| **Auto-resume on message** | Not possible without proxy | Automatic via `InvokeAgentRuntime` |
+| **Auto-resume on message** | Not possible without proxy | Automatic via `InvokeAgentRuntime` (requires the [Channel Router](CHANNEL_ROUTER.md) to bridge inbound channel messages to that API) |
 | **Managed patching** | SSM Patch Manager (you configure) | AWS-managed, zero-downtime |
 | **Built-in tracing** | Install X-Ray SDK manually | Native X-Ray integration |
 | **Health monitoring** | DIY health checks | Built-in `/ping` + auto-restart |

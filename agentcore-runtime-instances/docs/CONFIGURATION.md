@@ -14,13 +14,13 @@ Set in `container/.openclaw/openclaw.json`:
         "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
         "api": "bedrock-converse-stream",
         "auth": "aws-sdk",
-        "models": [{ "id": "us.anthropic.claude-sonnet-4-6", "name": "Claude Sonnet 4.6" }]
+        "models": [{ "id": "global.anthropic.claude-sonnet-4-6", "name": "Claude Sonnet 4.6" }]
       }
     }
   },
   "agents": {
     "defaults": {
-      "model": { "primary": "amazon-bedrock/us.anthropic.claude-sonnet-4-6" }
+      "model": { "primary": "amazon-bedrock/global.anthropic.claude-sonnet-4-6" }
     }
   }
 }
@@ -98,6 +98,15 @@ self.execution_role.add_to_policy(
 ```
 
 ## Channel Tokens with Secrets Manager
+
+> **Note:** This configures the legacy direct-polling channel mode (container
+> polls Telegram/Discord/Slack itself). It is incompatible with the
+> [Channel Router](CHANNEL_ROUTER.md) — running both means the container's
+> polling and the router's webhook fight over the same bot, and polling wins
+> by silently clearing the webhook. Use this section only if you are **not**
+> using the Channel Router and want an always-on instance with direct
+> channel connections. For idle-stop deployments, use the Channel Router
+> instead and leave `CHANNEL_SECRETS_ARN` unset.
 
 For production deployments, store channel tokens in AWS Secrets Manager instead of passing them via the invoke API.
 

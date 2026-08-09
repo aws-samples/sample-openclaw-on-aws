@@ -9,6 +9,7 @@
 | S3 (backup bucket) | ~$0.02/GB | Workspace typically <1GB |
 | S3 Gateway Endpoint | $0 | Free — used for backup sync |
 | Bedrock (Claude Sonnet 4.6) | Usage-based | $3/$15 per 1M input/output tokens |
+| Channel Router (Lambda + API Gateway + DynamoDB) | ~$0 | Free tier covers typical personal use; see [Channel Router](CHANNEL_ROUTER.md) |
 | **Total (active use)** | **~$55/mo** | Plus token costs |
 | **Total (mostly idle)** | **~$3/mo** | Agent auto-stops, only S3 + EBS costs |
 

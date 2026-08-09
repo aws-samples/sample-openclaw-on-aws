@@ -58,7 +58,7 @@ AgentCore provisions the per-user instance automatically on first `InvokeAgentRu
 
 ### Adding a Router for Centralized Channel Ingestion
 
-For teams using a single bot token (one Telegram bot, one Discord app) serving multiple users, add a Router Lambda:
+For teams using a single bot token (one Telegram bot, one Discord app) serving multiple users, add a Router Lambda. This is the same pattern used by the single-user [Channel Router](CHANNEL_ROUTER.md) — webhook → Lambda → `invoke-agent-runtime` — extended with a DynamoDB lookup to resolve *which* user's session to route to:
 
 ```
 Users (Telegram / Slack / Discord)

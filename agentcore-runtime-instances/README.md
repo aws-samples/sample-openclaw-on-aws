@@ -69,7 +69,28 @@ python3 scripts/deploy.sh
 
 ## Connecting Channels
 
-Use the helper script to connect a channel in one command:
+### Recommended: Lambda Router (persistent, survives idle-wake)
+
+Deploy the Lambda router for channels that work across instance idle-stop-wake cycles:
+
+```bash
+# Telegram
+./scripts/deploy-channel-router.sh \
+  --runtime-arn arn:aws:bedrock-agentcore:us-east-1:<ACCOUNT_ID>:runtime/<RUNTIME_ID> \
+  --telegram-token "YOUR_BOT_TOKEN" --telegram-allowed-ids "YOUR_TELEGRAM_USER_ID"
+```
+
+This deploys a Lambda + API Gateway that receives webhooks, wakes the instance on-demand via `invoke-agent-runtime`, and replies directly. The bot responds even after hours of inactivity — first message after idle takes 60-235s (cold start), subsequent messages a few seconds.
+
+**Supported channels:** Telegram, Discord, Slack — pass `--discord-token`/`--slack-token` (with their required companion flags) to enable them in the same deployment. See [Channel Router docs](docs/CHANNEL_ROUTER.md) for full multi-channel setup.
+
+```
+User message → Webhook → Lambda → invoke-agent-runtime (wakes instance) → reply
+```
+
+### Alternative: Direct Channel Polling (legacy)
+
+For always-on instances (high idle timeout), connect channels directly inside the container:
 
 ```bash
 export RUNTIME_ARN="arn:aws:bedrock-agentcore:us-east-1:<ACCOUNT_ID>:runtime/<RUNTIME_ID>"
@@ -78,18 +99,7 @@ export RUNTIME_ARN="arn:aws:bedrock-agentcore:us-east-1:<ACCOUNT_ID>:runtime/<RU
 ./scripts/connect-channel.sh slack "xapp-TOKEN" "xoxb-TOKEN"
 ```
 
-Or invoke directly to have the agent guide you through setup (e.g. creating a Telegram bot with BotFather):
-
-```bash
-PAYLOAD=$(echo -n '{"prompt":"Help me connect you to Telegram. Walk me through creating a bot with BotFather."}' | base64 -w0)
-aws bedrock-agentcore invoke-agent-runtime \
-  --agent-runtime-arn "$RUNTIME_ARN" \
-  --runtime-session-id "$SESSION_ID" \
-  --payload "$PAYLOAD" \
-  --region us-east-1 \
-  --cli-read-timeout 300 \
-  /dev/stdout
-```
+> **Note:** Direct polling only works while the instance is running. When the instance stops (idle timeout), the bot goes silent until manually woken. Use the Lambda router for persistent delivery.
 
 The agent patches its gateway config, restarts the channel, and confirms when live. Once connected, message the bot directly on that platform — no further API calls needed.
 
@@ -128,14 +138,22 @@ Once approved, the channel is fully active and subsequent messages flow directly
 ├── app.py                      # CDK app entrypoint
 ├── cdk.json                    # CDK configuration
 ├── requirements.txt            # Python dependencies (CDK)
-├── stacks/                     # CDK stacks (networking, storage, capacity, runtime)
+├── stacks/                     # CDK stacks (networking, storage, capacity, runtime, router)
+│   └── lambda_router_stack.py  # Lambda + API Gateway + DynamoDB for channel router
 ├── container/
 │   ├── Dockerfile              # ARM64: Node.js 24 + OpenClaw + Python + AWS CLI
 │   ├── start.sh                # Entrypoint: gateway + S3 backup sync
 │   ├── main.py                 # @app.entrypoint → OpenClaw HTTP endpoint bridge
 │   └── .openclaw/              # Default config + workspace
-├── docs/                       # Architecture, configuration, cost, cleanup guides
-└── scripts/                    # deploy.sh, connect-channel.sh, invoke.sh, teardown.sh
+├── lambda/router/              # Multi-channel webhook → AgentCore bridge
+│   ├── index.py                # Handler: channel detection, webhook/worker routing
+│   ├── core.py                 # AgentCore invocation + cold-start tracking (DynamoDB)
+│   └── adapters/               # Channel-specific parsing + sending
+│       ├── telegram.py         # Webhook validation, send/edit messages, cold-start UX
+│       ├── discord.py          # Interactions endpoint, deferred responses
+│       └── slack.py            # Events API, chat.postMessage/update
+├── docs/                       # Architecture, configuration, cost, runtime, channel router
+└── scripts/                    # deploy.sh, deploy-channel-router.sh, connect-channel.sh
 ```
 
 ## Security

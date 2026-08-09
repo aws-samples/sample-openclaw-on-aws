@@ -22,7 +22,46 @@ Enable with:
 
 **Remaining gap:** The Python wrapper still exists for the AgentCore SDK (`bedrock_agentcore` entrypoint). A fully native integration would eliminate Python entirely — OpenClaw could serve the AgentCore protocol (`:8080 /invocations + /ping`) directly.
 
-## 2. Slow Gateway Startup (No Lazy Init)
+## 2. Idle-Wake Channel Delivery (Solved: Lambda Router)
+
+**Status: ✅ Resolved (Lambda Router pattern)**
+
+**Problem:** When the instance auto-stops after idle timeout, outbound channel connections (Telegram polling, Discord WebSocket) die. Incoming messages cannot wake the instance — only `InvokeAgentRuntime` API calls can. Users see silence or stale error messages.
+
+**Solution:** External Lambda router that:
+1. Receives channel webhooks (always-on, serverless)
+2. Calls `invoke-agent-runtime` (which cold-starts the instance if stopped)
+3. Sends the response back to the channel directly
+
+```
+User message → Channel webhook → Lambda → invoke-agent-runtime (wakes instance)
+                                              ← response
+                                    Lambda → Channel API (reply)
+```
+
+**Key design decisions:**
+- **Async self-invoke pattern** — webhook handler returns 200 in <2s, fires worker async. Handles API Gateway 30s limit + Telegram 60s webhook timeout + AgentCore cold starts (variable, see below).
+- **Cold-start UX** — DynamoDB tracks last invocation; if idle timeout exceeded, sends "⏳ Waking up..." status message, edits with real response when ready.
+- **Multi-channel** — same Lambda handles Telegram, Discord, Slack via channel adapters. AgentCore invocation is channel-agnostic.
+- **4-hour rolling idle timeout** — `idleRuntimeSessionTimeout: 14400`. Resets on every message, not fixed from first activity. Instance stays warm across active-use sessions; a silent gap longer than 4h triggers the next message to cold-start.
+
+**Implementation detail:**
+`invoke_agent_runtime`'s streamed payload is returned under the boto3 response key **`"response"`** (a `StreamingBody`), not `"body"`. Using the wrong key makes every call silently return nothing regardless of success — no exception is raised, so a response-parsing bug can look like a timing/reliability problem. Verify the actual key by inspecting `resp.keys()` directly rather than assuming the SDK's shape from memory.
+
+**Measured cold-start timing:** warm-instance calls return in ~4s end-to-end (webhook -> worker -> AgentCore -> Telegram). Cold-start recovery, measured on an SSM-confirmed cold instance via the real webhook path with no retry needed: **91s** from webhook receipt to confirmed response. The Lambda retries the same `runtimeSessionId` on a schedule covering ~255s total as headroom for slower boots; this does not trigger competing/duplicate cold starts since AgentCore routes repeated calls with the same session ID to the same provisioning instance.
+
+Of that 91s, container/gateway startup accounts for ~5s; the remainder is EC2
+instance provisioning (AWS-managed, not reducible via container/application
+changes). See [Channel Router — Speeding up cold start](CHANNEL_ROUTER.md#speeding-up-cold-start)
+for the two available mitigations (longer rolling idle timeout, scheduled
+keep-warm pings) and their cost tradeoffs.
+
+**Before:** Bot stops responding after idle timeout. No recovery without manual intervention.
+**After:** Bot always responds. Warm-instance replies in seconds; cold-start replies in under two minutes with user-visible feedback throughout.
+
+See [Channel Router docs](CHANNEL_ROUTER.md) for full architecture and evidence.
+
+## 3. Slow Gateway Startup (No Lazy Init)
 
 **Problem:** OpenClaw gateway takes several seconds to boot — it eagerly loads plugins, skills, workspace files, and initializes all subsystems before serving requests.
 
@@ -38,7 +77,7 @@ Enable with:
 - [openclaw/openclaw#67040](https://github.com/openclaw/openclaw/issues/67040) — Persist plugin discovery cache, defer plugin loading
 - [openclaw/openclaw#48380](https://github.com/openclaw/openclaw/issues/48380) — Gateway startup regression with bundled plugins
 
-## 3. Incomplete Graceful Shutdown
+## 4. Incomplete Graceful Shutdown
 
 **Problem:** OpenClaw does handle SIGTERM (logs `[gateway] signal SIGTERM received`), but it doesn't guarantee in-flight agent turns complete before exit. There are known issues with shutdown timeouts leaving lock files and child processes not being terminated.
 
@@ -49,7 +88,7 @@ Enable with:
 - [openclaw/openclaw#57052](https://github.com/openclaw/openclaw/issues/57052) — Shutdown timeout leaves lock file
 - [openclaw/openclaw#18420](https://github.com/openclaw/openclaw/issues/18420) — Child process not terminated on SIGTERM
 
-## 4. Cron/Scheduler Assumes Always-On
+## 5. Cron/Scheduler Assumes Always-On
 
 **Problem:** OpenClaw's built-in cron scheduler fires based on an always-running process timer. When the instance auto-stops on idle, the process isn't running and scheduled jobs miss their fire times.
 
@@ -61,7 +100,7 @@ Enable with:
 - **Accept the gap** — For personal assistants, catching up reminders late is better than not at all
 - **Keep instance alive** — Set `idleInstanceTimeout` high enough that periodic cron activity prevents auto-stop
 
-## 5. Channel Reconnection on Resume
+## 6. Channel Reconnection on Resume
 
 **Problem:** When the instance auto-stops and resumes, outbound channel connections must re-establish. Behavior varies by channel:
 
@@ -81,7 +120,7 @@ Enable with:
 - [openclaw/openclaw#13688](https://github.com/openclaw/openclaw/issues/13688) — Discord 1005/1006 disconnects with failing resume logic
 - [openclaw/openclaw#11836](https://github.com/openclaw/openclaw/issues/11836) — Discord infinite reconnection loop
 
-## 6. `OPENCLAW_HOME` Path Assumptions
+## 7. `OPENCLAW_HOME` Path Assumptions
 
 **Problem:** OpenClaw defaults to `~/.openclaw/` and while it supports `--home` or `OPENCLAW_HOME`, some internal paths (plugin cache, skill downloads, npm packages) may not fully respect the override.
 
@@ -89,7 +128,7 @@ Enable with:
 
 **Ideal:** All internal paths should derive exclusively from `OPENCLAW_HOME` with zero fallback to `~/.openclaw/`.
 
-## 7. No Workspace Size Awareness
+## 8. No Workspace Size Awareness
 
 **Problem:** EBS root volume has a fixed size (30GB); S3 backup costs scale with size. OpenClaw doesn't track or constrain its own workspace disk usage.
 
@@ -101,7 +140,7 @@ Enable with:
 
 ---
 
-## 8. Persistence: EBS Works, S3 Files Doesn't (Yet) for Instances
+## 9. Persistence: EBS Works, S3 Files Doesn't (Yet) for Instances
 
 **Status (Aug 2026):** `filesystemConfigurations` (S3 Files, EFS, sessionStorage) is NOT supported with `capacityProviderConfiguration` (Instances compute type). The API returns:
 
@@ -163,13 +202,14 @@ On AWS this maps to Aurora Serverless v2 (scales to zero, pgvector, IAM auth).
 | Consideration | Severity | Workaround | Effort |
 |-----|----------|---------------------|--------|
 | 1. HTTP endpoint | ✅ Resolved | HTTP `/v1/responses` endpoint | Low |
-| 2. Slow startup | High | Wrapper serves health check first | Low |
-| 3. Incomplete graceful shutdown | Medium | SIGTERM trap in start.sh | Low |
-| 4. Cron catch-up timing | Low | Catch-up exists; accept stale jobs | Low |
-| 5. Channel reconnection | Medium | Use Telegram/Slack (Discord has issues) | Low |
-| 6. OPENCLAW_HOME paths | Low | Testing confirms it works for core | Low |
-| 7. No size awareness | Low | Manual cleanup / S3 lifecycle rules | Low |
-| 8. S3 Files not supported | Low | EBS + S3 sync (works great) | N/A (AWS) |
-| 9. Database scaling | Low | Memory plugin slot exists; EBS/S3 for rest | Medium |
+| 2. Idle-wake channel delivery | ✅ Resolved | Lambda router (webhook → invoke → reply) | Medium |
+| 3. Slow startup | High | Wrapper serves health check first | Low |
+| 4. Incomplete graceful shutdown | Medium | SIGTERM trap in start.sh | Low |
+| 5. Cron catch-up timing | Low | Catch-up exists; accept stale jobs | Low |
+| 6. Channel reconnection | Low | Lambda router bypasses this entirely | Low |
+| 7. OPENCLAW_HOME paths | Low | Testing confirms it works for core | Low |
+| 8. No size awareness | Low | Manual cleanup / S3 lifecycle rules | Low |
+| 9. S3 Files not supported | Low | EBS + S3 sync (works great) | N/A (AWS) |
+| 10. Database scaling | Low | Memory plugin slot exists; EBS/S3 for rest | Medium |
 
 **Consideration #1 (HTTP endpoint) would eliminate the need for the Python wrapper entirely**, reducing container size by ~200MB, removing the startup race, and making the deployment a single Node.js process.

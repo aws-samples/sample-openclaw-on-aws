@@ -23,26 +23,53 @@ Understanding how OpenClaw behaves on AgentCore Runtime Instances across differe
 
 ## Messaging Channels (Telegram, Discord, Slack)
 
-Channels use **outbound long-polling or WebSocket connections** from inside the container. They only work while the gateway process is running.
+### Architecture: Lambda Router (Recommended)
+
+The **Lambda Router** pattern provides persistent channel delivery across idle-wake cycles. Channels are handled externally via webhooks — the container does NOT poll channels directly.
+
+```
+User message → Channel webhook → Lambda → invoke-agent-runtime (wakes instance)
+                                              ← response
+                                    Lambda → Channel API (reply to user)
+```
 
 | State | Channel behavior | Messages from users |
 |-------|-----------------|---------------------|
-| **Running** | Connected, responding in real-time | Delivered immediately |
-| **Stopped (idle)** | Disconnected, no polling | Queued by Telegram/Slack (~24h); Discord may drop |
-| **Resumed** | Auto-reconnects, queued messages delivered | Delivered on reconnect (may be stale) |
-| **Expired (14-day)** | Reconnects after S3 restore | Delivered after restore (if within queue TTL) |
+| **Running** | Responding in real-time (5-15s) | Delivered immediately via Lambda |
+| **Stopped (idle)** | Lambda still receives webhooks | Delivered after cold start (~90s) |
+| **Expired (14-day)** | Lambda wakes new instance, S3 restore | Delivered after restore + boot |
 
-### Key implication
+### Key behavior
 
-**When the instance is stopped, the bot does not respond.** Telegram and Slack queue messages server-side (typically 24 hours). Discord may not reliably deliver missed messages.
+**The bot always responds**, regardless of instance state. The Lambda router is serverless and always available. It triggers `invoke-agent-runtime` which cold-starts the instance automatically.
 
-The instance only wakes on an explicit `InvokeAgentRuntime` API call — incoming Telegram messages cannot trigger a wake.
+Cold-start UX: user sees "⏳ Waking up..." immediately, then the real response replaces it.
 
-### Recommendations
+### Idle-Wake Cycle
 
-- Set `idleRuntimeSessionTimeout` high enough for your use case (default: 900s / 15 min)
-- For always-responsive bots, set timeout to 28800 (8 hours) or the `maxLifetime` value
-- Accept that the bot sleeps during idle periods — message when you need it, it resumes in ~30s
+```
+t=0      User sends message
+t=0.5s   Lambda receives webhook, returns 200 to channel
+t=1s     Lambda worker calls invoke-agent-runtime
+t=1s     AgentCore provisions new instance (if stopped)
+t=60s    Instance boots, container starts, gateway initializes
+t=70-80s Gateway ready, processes prompt, calls Bedrock
+t=80-90s Response sent to user via channel API
+```
+
+Subsequent messages while instance is warm: 5-15s.
+
+### Configuration
+
+- `idleRuntimeSessionTimeout: 14400` (4 hours) — rolling window: resets on every `invoke-agent-runtime` call, not fixed from first activity. Instance stays warm as long as a message arrives at least once within the window; a gap longer than the timeout triggers a cold start on the next message.
+- Container runs in **webhook-only mode** (no `CHANNEL_SECRETS_ARN`)
+- Lambda handles all channel I/O externally
+
+See [Channel Router docs](CHANNEL_ROUTER.md) for full setup.
+
+### Legacy: Direct Polling (Not Recommended)
+
+If `CHANNEL_SECRETS_ARN` is set, the container polls channels directly. This breaks when the instance stops — the bot goes silent with no way to wake it from an incoming message. Use only if you keep the instance always-on.
 
 ## Idle Timeout and What Keeps the Session Alive
 
@@ -123,7 +150,7 @@ Configure `S3_BACKUP_BUCKET` environment variable so the workspace (including cr
 ```json
 {
   "lifecycleConfiguration": {
-    "idleRuntimeSessionTimeout": 900,   // seconds before auto-stop (default: 15 min)
+    "idleRuntimeSessionTimeout": 14400,  // seconds before auto-stop (default: 4 hours, rolling window)
     "maxLifetime": 28800                // max session duration (default: 8 hours, max: 14 days)
   }
 }
@@ -133,8 +160,8 @@ These are set on the agent runtime via `create-agent-runtime` or `update-agent-r
 
 ### Recommended values for messaging bots
 
-| Use case | idleRuntimeSessionTimeout | maxLifetime |
-|----------|--------------------------|-------------|
-| Personal bot (occasional use) | 3600 (1 hour) | 28800 (8 hours) |
-| Active bot (frequent messaging) | 14400 (4 hours) | 86400 (24 hours) |
-| Always-on (within session) | 86400 (24 hours) | 1209600 (14 days) |
+| Use case | idleRuntimeSessionTimeout | maxLifetime | Notes |
+|----------|--------------------------|-------------|-------|
+| Lambda router (recommended) | 14400 (4 hours) | 1209600 (14 days) | Rolling window — resets per message; ~90s wake after a 4h+ gap |
+| Frequent messaging | 3600 (1 hour) | 86400 (24 hours) | Fewer cold starts |
+| Always-on (no cold starts) | 86400 (24 hours) | 1209600 (14 days) | Higher cost, instant responses |
