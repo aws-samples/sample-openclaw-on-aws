@@ -48,10 +48,10 @@ User message → Channel webhook → Lambda → invoke-agent-runtime (wakes inst
 **Implementation detail:**
 `invoke_agent_runtime`'s streamed payload is returned under the boto3 response key **`"response"`** (a `StreamingBody`), not `"body"`. Using the wrong key makes every call silently return nothing regardless of success — no exception is raised, so a response-parsing bug can look like a timing/reliability problem. Verify the actual key by inspecting `resp.keys()` directly rather than assuming the SDK's shape from memory.
 
-**Measured cold-start timing:** warm-instance calls return in 1-4s. Cold-start wall-clock time (before `invoke_agent_runtime` starts succeeding) has been observed ranging ~60s–235s+ across runs — not a fixed number. The Lambda retries the same `runtimeSessionId` on a schedule covering ~255s total; this does not trigger competing/duplicate cold starts since AgentCore routes repeated calls with the same session ID to the same provisioning instance.
+**Measured cold-start timing:** warm-instance calls return in ~4s end-to-end (webhook -> worker -> AgentCore -> Telegram). Cold-start recovery, measured on an SSM-confirmed cold instance via the real webhook path with no retry needed: **91s** from webhook receipt to confirmed response. The Lambda retries the same `runtimeSessionId` on a schedule covering ~255s total as headroom for slower boots; this does not trigger competing/duplicate cold starts since AgentCore routes repeated calls with the same session ID to the same provisioning instance.
 
 **Before:** Bot stops responding after idle timeout. No recovery without manual intervention.
-**After:** Bot always responds. Warm-instance replies in a few seconds; cold-start replies typically within 1-4 minutes with user-visible feedback throughout.
+**After:** Bot always responds. Warm-instance replies in seconds; cold-start replies in under two minutes with user-visible feedback throughout.
 
 See [Channel Router docs](CHANNEL_ROUTER.md) for full architecture and evidence.
 

@@ -147,13 +147,17 @@ def invoke_agent(message_text: str, session_id: str = None) -> str | None:
 def invoke_with_retry(message_text: str, session_id: str = None) -> str:
     """Invoke AgentCore with retry logic for cold starts.
 
-    With the response-parsing bug fixed, a single invoke_agent_runtime call
-    that lands on a warm instance now returns correctly on the FIRST
-    attempt. Retries only matter for genuine cold starts, where AgentCore
-    fails fast (RuntimeClientError/ResourceNotFoundException) while the
-    instance is still provisioning/booting -- it does not block/queue.
-    Observed cold-start wall-clock time has ranged roughly 60s-235s across
-    test runs, so the schedule below covers ~4-5 minutes of wall-clock time.
+    A single invoke_agent_runtime call that lands on a warm instance returns
+    correctly on the FIRST attempt (measured: ~4s round trip through the full
+    webhook -> worker -> AgentCore -> Telegram path). Retries matter only for
+    genuine cold starts, where AgentCore fails fast
+    (RuntimeClientError/ResourceNotFoundException) while the instance is
+    still provisioning/booting -- it does not block/queue.
+
+    Measured cold-start recovery (SSM-confirmed cold instance, real webhook
+    path, zero prior activity): 91s from webhook receipt to confirmed
+    response, succeeding without needing a retry. The schedule below
+    provides headroom beyond that measured baseline for slower boots.
     """
     session_id = session_id or SESSION_ID
 

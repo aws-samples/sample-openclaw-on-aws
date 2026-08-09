@@ -140,7 +140,7 @@ def send_cold_start_notice(chat_id, reply_to=None) -> int | None:
     """Send a cold-start notice. Returns the message_id to edit later."""
     result = send_message(
         chat_id,
-        "\u23f3 Waking up the AI instance... first response may take ~60s.",
+        "\u23f3 Waking up the AI instance... first response may take ~90s.",
         reply_to=reply_to,
     )
     if result:

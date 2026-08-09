@@ -36,7 +36,7 @@ User message → Channel webhook → Lambda → invoke-agent-runtime (wakes inst
 | State | Channel behavior | Messages from users |
 |-------|-----------------|---------------------|
 | **Running** | Responding in real-time (5-15s) | Delivered immediately via Lambda |
-| **Stopped (idle)** | Lambda still receives webhooks | Delivered after cold start (60-90s) |
+| **Stopped (idle)** | Lambda still receives webhooks | Delivered after cold start (~90s) |
 | **Expired (14-day)** | Lambda wakes new instance, S3 restore | Delivered after restore + boot |
 
 ### Key behavior
@@ -162,6 +162,6 @@ These are set on the agent runtime via `create-agent-runtime` or `update-agent-r
 
 | Use case | idleRuntimeSessionTimeout | maxLifetime | Notes |
 |----------|--------------------------|-------------|-------|
-| Lambda router (recommended) | 900 (15 min) | 1209600 (14 days) | Zero cost when idle, 60-90s wake |
+| Lambda router (recommended) | 900 (15 min) | 1209600 (14 days) | Zero cost when idle, ~90s wake |
 | Frequent messaging | 3600 (1 hour) | 86400 (24 hours) | Fewer cold starts |
 | Always-on (no cold starts) | 86400 (24 hours) | 1209600 (14 days) | Higher cost, instant responses |

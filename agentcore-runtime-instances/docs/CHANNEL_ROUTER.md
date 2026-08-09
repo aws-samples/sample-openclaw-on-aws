@@ -39,7 +39,7 @@ Channel ← reply (sendMessage / edit / postMessage)
 | Instance stops when idle — bot goes silent | Lambda invocation triggers cold start automatically |
 | API Gateway 30s timeout | Async self-invoke decouples processing from webhook response |
 | Telegram 60s webhook timeout | Same — worker runs independently |
-| User sees no feedback during 60-90s cold start | Cold-start detection + immediate status message |
+| User sees no feedback during cold start | Cold-start detection + immediate status message |
 | Markdown characters break Telegram replies | Plain text (no parse_mode) |
 
 ## Cold-Start UX
@@ -74,24 +74,27 @@ produces no exception to catch.
 
 ### Warm vs cold latency
 
-On a **warm** instance, `invoke_agent_runtime` returns on the first attempt
-in roughly 1-5 seconds end-to-end (webhook handler + async worker +
-AgentCore + Telegram send).
+On a **warm** instance, `invoke_agent_runtime` returns on the first attempt.
+Measured through the full webhook -> worker -> AgentCore -> Telegram path:
+**~4 seconds** end-to-end.
 
 On a **cold** instance, `invoke_agent_runtime` **fails fast** (does not
 block/queue) while the EC2 instance is provisioning and the container is
-booting. Cold-start wall-clock time before the invocation starts succeeding
-ranges roughly 60s-235s depending on:
+booting. Measured cold-start recovery (SSM-confirmed cold instance, zero
+prior activity, real webhook path, no retry needed): **91 seconds** from
+webhook receipt to confirmed response delivered to Telegram. Contributing
+factors:
 
 - EC2 instance launch + container pull time
 - OpenClaw gateway subprocess startup (workspace load, model config, plugin discovery)
 - Occasional S3 restore path when the workspace isn't already on EBS
 
 **Retry strategy:** the Lambda retries with a schedule covering ~255s total
-(`core.py` `invoke_with_retry`: delays of 0, 15, 20, 25, 30, 35, 40, 45, 45s).
-Each retry is a fresh `invoke_agent_runtime` call against the *same*
-`runtimeSessionId` — AgentCore routes it to the same provisioning/booting
-instance rather than starting a new one, so retries don't cause competing
+(`core.py` `invoke_with_retry`: delays of 0, 15, 20, 25, 30, 35, 40, 45, 45s)
+as headroom beyond the measured baseline for slower boots. Each retry is a
+fresh `invoke_agent_runtime` call against the *same* `runtimeSessionId` —
+AgentCore routes it to the same provisioning/booting instance rather than
+starting a new one, so retries don't cause competing
 cold starts.
 
 ### Why "LLM request failed" or RuntimeClientError 400 can appear briefly
@@ -213,6 +216,6 @@ Lambda role requires:
 | "Sorry, the instance failed to respond" | All retry attempts (~255s) exhausted — cold start took longer than the window | Message again; instance is now warm from the attempt |
 | No response at all | Webhook not set, or something is polling `getUpdates` and clearing it | Check `getWebhookInfo`; ensure container has no `channels.telegram` in its persisted config (see below) |
 | 403 on webhook | Secret token mismatch | Verify `WEBHOOK_SECRET_TOKEN` matches setWebhook |
-| Response takes 1-4 min | Instance cold-starting from idle (expected, not a bug) | Normal for first message after 15-min idle; see Cold-Start Behaviour above |
+| First response after idle takes ~90s | Instance cold-starting (expected, not a bug) | Normal for first message after 15-min idle; see Cold-Start Behaviour above |
 | DynamoDB error in logs | Table missing or IAM insufficient | Create table; check IAM policy |
 | Webhook silently disappears | Container's own Telegram channel config got restored/re-synced from EBS/S3 and started polling | Strip `channels` from persisted `openclaw.json`; container's `_strip_channels_for_webhook_mode()` (main.py) does this on every boot when `CHANNEL_SECRETS_ARN` is unset |
