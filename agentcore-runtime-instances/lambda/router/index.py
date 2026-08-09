@@ -1,216 +1,185 @@
-"""Telegram Router Lambda — Async webhook-to-AgentCore bridge.
+"""Multi-channel Router Lambda -- Async webhook-to-AgentCore bridge.
 
-Architecture (handles cold starts gracefully):
-1. Webhook handler: validates request, returns 200 immediately, async-invokes worker
-2. Worker: invokes AgentCore (up to 5 min cold start), sends reply directly to Telegram
+Supports: Telegram, Discord, Slack (extensible to WhatsApp, etc.)
 
-This avoids API Gateway's 30s timeout and Telegram's 60s webhook timeout
-while supporting AgentCore cold starts that can take 2-3 minutes.
+Architecture:
+1. Webhook handler: validates, parses channel-specific format, returns fast
+2. Async worker: invokes AgentCore, sends response via channel-specific API
+3. Cold-start UX: detects idle instance, shows status to user, updates with response
 
-Setup:
-  - API Gateway HTTP API with POST /webhook/telegram route
-  - Telegram webhook pointed at the API Gateway URL
-  - Lambda env vars: AGENTCORE_RUNTIME_ARN, SESSION_ID, TELEGRAM_BOT_TOKEN,
-    WEBHOOK_SECRET_TOKEN, ALLOWED_USER_IDS
-  - IAM: bedrock-agentcore:InvokeAgentRuntime + lambda:InvokeFunction (self)
+Routing by API Gateway path:
+  POST /webhook/telegram  -> telegram adapter
+  POST /webhook/discord   -> discord adapter
+  POST /webhook/slack     -> slack adapter
 """
 
-import base64
 import json
 import logging
 import os
-from urllib import request as urllib_request
-from urllib.error import URLError
+import sys
 
 import boto3
-from botocore.config import Config
+
+# Add current dir to path for local imports
+sys.path.insert(0, os.path.dirname(__file__))
+
+from core import is_likely_cold_start, invoke_with_retry
+from adapters import telegram as tg_adapter
+from adapters import discord as dc_adapter
+from adapters import slack as sl_adapter
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Configuration
-AGENTCORE_RUNTIME_ARN = os.environ["AGENTCORE_RUNTIME_ARN"]
-SESSION_ID = os.environ["SESSION_ID"]
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-WEBHOOK_SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET_TOKEN", "")
-ALLOWED_USER_IDS = os.environ.get("ALLOWED_USER_IDS", "").split(",")
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 FUNCTION_NAME = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
-# Clients
-agentcore_client = boto3.client(
-    "bedrock-agentcore",
-    region_name=AWS_REGION,
-    config=Config(read_timeout=300, connect_timeout=10, retries={"max_attempts": 0}),
-)
 lambda_client = boto3.client("lambda", region_name=AWS_REGION)
 
-
-def send_telegram(chat_id, text, reply_to_message_id=None):
-    """Send a message to Telegram (plain text, no parse_mode to avoid formatting errors)."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text[:4096],
-    }
-    if reply_to_message_id:
-        payload["reply_to_message_id"] = reply_to_message_id
-    data = json.dumps(payload).encode()
-    req = urllib_request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    try:
-        urllib_request.urlopen(req, timeout=10)
-        logger.info("Telegram send ok: chat=%s msg=%s", chat_id, reply_to_message_id)
-    except URLError as e:
-        logger.error("Failed to send Telegram message: %s", e)
+# Channel adapter registry
+ADAPTERS = {
+    "telegram": tg_adapter,
+    "discord": dc_adapter,
+    "slack": sl_adapter,
+}
 
 
-def send_typing(chat_id):
-    """Send typing indicator."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
-    payload = {"chat_id": chat_id, "action": "typing"}
-    data = json.dumps(payload).encode()
-    req = urllib_request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    try:
-        urllib_request.urlopen(req, timeout=5)
-    except URLError:
-        pass
+def detect_channel(event: dict) -> str:
+    """Detect which channel sent the webhook based on path or headers."""
+    # API Gateway HTTP API puts the path in requestContext
+    path = event.get("rawPath", "") or event.get("path", "")
+
+    if "/telegram" in path:
+        return "telegram"
+    if "/discord" in path:
+        return "discord"
+    if "/slack" in path:
+        return "slack"
+
+    # Fallback: check headers for channel-specific markers
+    headers = event.get("headers", {})
+    if "x-telegram-bot-api-secret-token" in headers:
+        return "telegram"
+    if "x-slack-signature" in headers:
+        return "slack"
+
+    # Default to telegram for backward compat
+    return "telegram"
 
 
-def invoke_agent(message_text):
-    """Invoke the AgentCore Runtime and return the response text.
+def handle_webhook(event: dict) -> dict:
+    """Phase 1: Validate, parse, send cold-start notice, async-invoke worker."""
+    channel = detect_channel(event)
+    adapter = ADAPTERS.get(channel)
 
-    Returns None on failure (caller should retry or send error).
-    """
-    payload = json.dumps({"prompt": message_text}).encode()
-    payload_b64 = base64.b64encode(payload).decode()
+    if not adapter:
+        return {"statusCode": 400, "body": f"Unknown channel: {channel}"}
 
-    try:
-        resp = agentcore_client.invoke_agent_runtime(
-            agentRuntimeArn=AGENTCORE_RUNTIME_ARN,
-            runtimeSessionId=SESSION_ID,
-            payload=payload_b64,
-        )
-        body = resp.get("body")
-        if body:
-            result = ""
-            for event in body:
-                if "chunk" in event:
-                    chunk_bytes = event["chunk"].get("bytes", b"")
-                    result += chunk_bytes.decode("utf-8", errors="replace")
-            # Parse response - handler returns data: {"result": "text"}
-            try:
-                text = result.split("data: ", 1)[-1] if "data: " in result else result
-                data = json.loads(text)
-                return data.get("result", result)
-            except (json.JSONDecodeError, IndexError):
-                return result if result else None
-        return None
-    except Exception as e:
-        logger.error("AgentCore invocation failed: %s", e, exc_info=True)
-        return None
+    # Validate webhook authenticity
+    if not adapter.validate_webhook(event):
+        logger.warning("Invalid webhook for channel: %s", channel)
+        return {"statusCode": 403, "body": "Forbidden"}
 
+    # Parse the inbound message
+    parsed = adapter.parse_inbound(event)
 
-def handle_worker(event):
-    """Worker phase: invoke AgentCore and reply to Telegram.
-
-    Retries once on failure to handle the case where the instance is
-    mid-cold-start and the gateway isn't ready yet.
-    """
-    chat_id = event["chat_id"]
-    message_text = event["message_text"]
-    message_id = event.get("message_id")
-
-    send_typing(chat_id)
-
-    response_text = invoke_agent(message_text)
-
-    if response_text is None:
-        # First attempt failed — instance might be mid-cold-start.
-        # Wait and retry once.
-        logger.info("First attempt failed, retrying after 10s...")
-        import time
-        time.sleep(10)
-        send_typing(chat_id)
-        response_text = invoke_agent(message_text)
-
-    if response_text is None:
-        response_text = (
-            "Sorry, I'm having trouble right now. "
-            "The instance may be cold-starting. Please try again in ~60 seconds."
-        )
-
-    send_telegram(chat_id, response_text, reply_to_message_id=message_id)
-    return {"statusCode": 200, "body": "Worker complete"}
-
-
-def handle_webhook(event):
-    """Webhook phase: validate, return 200 fast, async-invoke worker."""
-    # Validate webhook secret token
-    if WEBHOOK_SECRET_TOKEN:
-        headers = event.get("headers", {})
-        secret = headers.get("x-telegram-bot-api-secret-token", "")
-        if secret != WEBHOOK_SECRET_TOKEN:
-            logger.warning("Invalid webhook secret token")
-            return {"statusCode": 403, "body": "Forbidden"}
-
-    # Parse the Telegram update
-    try:
-        body = json.loads(event.get("body", "{}"))
-    except json.JSONDecodeError:
-        return {"statusCode": 400, "body": "Invalid JSON"}
-
-    message = body.get("message") or body.get("edited_message")
-    if not message:
+    if parsed is None:
         return {"statusCode": 200, "body": "OK"}
 
-    # Extract message details
-    chat_id = message["chat"]["id"]
-    user_id = str(message["from"]["id"])
-    message_text = message.get("text", "")
-    message_id = message.get("message_id")
+    # Handle special cases (Discord PING, Slack challenge)
+    if parsed.get("_ping"):
+        return {"statusCode": 200, "body": json.dumps({"type": 1}),
+                "headers": {"Content-Type": "application/json"}}
+    if "_challenge" in parsed:
+        return {"statusCode": 200, "body": json.dumps({"challenge": parsed["_challenge"]}),
+                "headers": {"Content-Type": "application/json"}}
 
-    # Access control
-    if ALLOWED_USER_IDS and ALLOWED_USER_IDS != [""] and user_id not in ALLOWED_USER_IDS:
-        logger.warning("Unauthorized user: %s", user_id)
-        send_telegram(chat_id, "Access denied.", reply_to_message_id=message_id)
-        return {"statusCode": 200, "body": "OK"}
+    logger.info("Inbound %s from user %s: %s",
+                channel, parsed.get("user_id"), parsed.get("message_text", "")[:100])
 
-    if not message_text:
-        return {"statusCode": 200, "body": "OK"}
+    # Send typing / cold-start notice
+    cold = is_likely_cold_start()
+    notice_id = None
 
-    if message_text.startswith("/start"):
-        send_telegram(
-            chat_id,
-            "Hello! I'm your AI assistant powered by OpenClaw on AWS. "
-            "Send me a message and I'll respond."
-        )
-        return {"statusCode": 200, "body": "OK"}
+    if channel == "telegram":
+        if cold:
+            notice_id = adapter.send_cold_start_notice(
+                parsed["chat_id"], reply_to=parsed.get("message_id"))
+        else:
+            adapter.send_typing(parsed["chat_id"])
+    elif channel == "discord" and parsed.get("interaction_token"):
+        adapter.send_deferred_response(parsed["message_id"], parsed["interaction_token"])
+        if cold:
+            notice_id = adapter.send_cold_start_notice(
+                interaction_token=parsed["interaction_token"])
+    elif channel == "slack":
+        if cold:
+            notice_id = adapter.send_cold_start_notice(
+                parsed["chat_id"], thread_ts=parsed.get("thread_ts"))
 
-    logger.info("Processing message from user %s: %s", user_id, message_text[:100])
-
-    # Send typing indicator immediately
-    send_typing(chat_id)
-
-    # Async invoke self as worker (decouples from API Gateway timeout)
+    # Async invoke worker
     worker_payload = {
         "_worker": True,
-        "chat_id": chat_id,
-        "message_text": message_text,
-        "message_id": message_id,
+        "channel": channel,
+        "parsed": parsed,
+        "notice_id": notice_id,
+        "is_cold": cold,
     }
 
     lambda_client.invoke(
         FunctionName=FUNCTION_NAME,
-        InvocationType="Event",  # Async — returns immediately
+        InvocationType="Event",
         Payload=json.dumps(worker_payload).encode(),
     )
 
-    # Return 200 immediately — Telegram won't retry
     return {"statusCode": 200, "body": "OK"}
 
 
+def handle_worker(event: dict) -> dict:
+    """Phase 2: Invoke AgentCore and send response via channel adapter."""
+    channel = event["channel"]
+    parsed = event["parsed"]
+    notice_id = event.get("notice_id")
+    is_cold = event.get("is_cold", False)
+
+    adapter = ADAPTERS[channel]
+    message_text = parsed["message_text"]
+
+    # Keep sending typing indicators during processing (for non-cold Telegram)
+    if channel == "telegram" and not is_cold:
+        adapter.send_typing(parsed["chat_id"])
+
+    # Invoke AgentCore
+    response_text = invoke_with_retry(message_text)
+
+    # Send response via channel-specific method
+    if channel == "telegram":
+        if notice_id:
+            # Replace cold-start notice with real response
+            adapter.replace_cold_start_notice(parsed["chat_id"], notice_id, response_text)
+        else:
+            adapter.send_message(parsed["chat_id"], response_text, reply_to=parsed.get("message_id"))
+
+    elif channel == "discord":
+        interaction_token = parsed.get("interaction_token")
+        if interaction_token:
+            adapter.replace_cold_start_notice(interaction_token, response_text)
+        else:
+            adapter.send_message(parsed["chat_id"], response_text)
+
+    elif channel == "slack":
+        if notice_id:
+            adapter.replace_cold_start_notice(parsed["chat_id"], notice_id, response_text)
+        else:
+            adapter.send_message(
+                parsed["chat_id"], response_text,
+                thread_ts=parsed.get("thread_ts") or parsed.get("message_id"))
+
+    return {"statusCode": 200, "body": "Worker complete"}
+
+
 def handler(event, context):
-    """Lambda entry point — routes to webhook or worker handler."""
+    """Lambda entry point -- routes to webhook or worker handler."""
     if event.get("_worker"):
         return handle_worker(event)
     return handle_webhook(event)
