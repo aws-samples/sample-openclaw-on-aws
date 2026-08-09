@@ -36,7 +36,7 @@ Telegram → Webhook → API Gateway → Lambda (webhook handler)
 
 ## Cold Start Timeline
 
-First message after idle timeout (24h default):
+First message after idle timeout (15 min default):
 
 ```
 t=0s    Telegram sends webhook to API Gateway
@@ -120,3 +120,26 @@ Lambda role needs:
   ]
 }
 ```
+
+## Runtime Configuration
+
+### Idle Timeout
+
+The AgentCore runtime `idleRuntimeSessionTimeout` should be set to **900 seconds (15 min)**.
+This keeps the instance warm during active conversations but shuts it down quickly to save cost.
+The Lambda router handles wake-on-demand via `invoke-agent-runtime`.
+
+```bash
+aws bedrock-agentcore-control update-agent-runtime \
+  --agent-runtime-id <RUNTIME_ID> \
+  --agent-runtime-artifact '{"containerConfiguration":{"containerUri":"<ECR_URI>"}}' \
+  --role-arn "<EXECUTION_ROLE_ARN>" \
+  --capacity-provider-configuration '{"capacityProviderArn":"<CAPACITY_PROVIDER_ARN>"}' \
+  --lifecycle-configuration '{"idleRuntimeSessionTimeout": 900}' \
+  --region us-east-1
+```
+
+With 15-min idle timeout + Lambda wake-on-demand:
+- Active conversation: instance stays warm, responses in 5-15s
+- 15 min of silence: instance terminates (zero cost)
+- Next message: cold start ~60-90s, then warm again
