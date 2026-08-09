@@ -14,13 +14,13 @@ Set in `container/.openclaw/openclaw.json`:
         "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
         "api": "bedrock-converse-stream",
         "auth": "aws-sdk",
-        "models": [{ "id": "us.anthropic.claude-sonnet-4-6", "name": "Claude Sonnet 4.6" }]
+        "models": [{ "id": "global.anthropic.claude-sonnet-4-6", "name": "Claude Sonnet 4.6" }]
       }
     }
   },
   "agents": {
     "defaults": {
-      "model": { "primary": "amazon-bedrock/us.anthropic.claude-sonnet-4-6" }
+      "model": { "primary": "amazon-bedrock/global.anthropic.claude-sonnet-4-6" }
     }
   }
 }
