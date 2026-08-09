@@ -1,15 +1,18 @@
-"""OpenClaw ↔ AgentCore Runtime Wrapper (HTTP endpoint)
+"""OpenClaw <-> AgentCore Runtime Wrapper (HTTP endpoint)
 
 Bridges AgentCore Runtime protocol (:8080) to OpenClaw gateway's
 OpenAI-compatible HTTP endpoint (/v1/responses).
 
 Flow:
   1. On startup: initialize workspace, start OpenClaw gateway as subprocess
-  2. AgentCore → POST /invocations → this wrapper → POST /v1/responses → response
-  3. AgentCore → GET /ping → health status
+  2. AgentCore -> POST /invocations -> this wrapper -> POST /v1/responses -> response
+  3. AgentCore -> GET /ping -> health status
 
-This replaces the WebSocket-based approach with a simple HTTP call,
-reducing complexity from ~200 lines to ~80 lines.
+Persistence model (webhook-only architecture):
+  - Telegram webhook -> API Gateway -> Lambda -> invoke-agent-runtime -> this wrapper
+  - Instance cold-starts on first invoke, stays warm for idleRuntimeSessionTimeout
+  - Gateway health check blocks handler until ready (prevents 400 during cold-start)
+  - No Telegram polling in container -- webhook-only via external Lambda router
 """
 
 import json
@@ -38,7 +41,7 @@ def _initialize_workspace():
     """Initialize workspace from defaults if not present on EBS."""
     config_path = os.path.join(OPENCLAW_HOME, "openclaw.json")
     if os.path.exists(config_path):
-        print("[main.py] Workspace exists on EBS — zero cold start.")
+        print("[main.py] Workspace exists on EBS -- zero cold start.")
         return
 
     print("[main.py] Workspace not found. Initializing from defaults...")
@@ -57,7 +60,11 @@ def _initialize_workspace():
 
 
 def _load_channel_secrets():
-    """Load channel tokens from Secrets Manager if CHANNEL_SECRETS_ARN is set."""
+    """Load channel tokens from Secrets Manager if CHANNEL_SECRETS_ARN is set.
+
+    NOTE: In webhook-only mode (Lambda router handles Telegram I/O), this is
+    not needed. Only use when the container should do its own channel polling.
+    """
     secret_arn = os.environ.get("CHANNEL_SECRETS_ARN", "")
     if not secret_arn:
         return
@@ -109,25 +116,40 @@ def _start_gateway():
     print(f"[main.py] Gateway PID: {_gateway_process.pid}")
 
 
-def _wait_for_gateway(timeout: float = 120.0) -> bool:
-    """Wait for the gateway HTTP endpoint to become available."""
+def _wait_for_gateway(timeout: float = 180.0) -> bool:
+    """Wait for the gateway HTTP endpoint to become available.
+
+    Extended to 180s to handle cold-start scenarios where workspace restore,
+    npm operations, and model config loading all happen sequentially.
+    """
     global _gateway_ready
     if _gateway_ready:
         return True
 
     start = time.time()
+    attempt = 0
     while time.time() - start < timeout:
         try:
-            urlopen(GATEWAY_HEALTH_URL, timeout=2)
+            urlopen(GATEWAY_HEALTH_URL, timeout=3)
+            elapsed = time.time() - start
+            print(f"[main.py] Gateway ready after {elapsed:.1f}s ({attempt} attempts)")
             _gateway_ready = True
             return True
         except (URLError, OSError):
-            time.sleep(0.5)
+            attempt += 1
+            time.sleep(1.0)
+    print(f"[main.py] ERROR: Gateway did not become ready within {timeout}s")
     return False
 
 
 def _invoke_gateway(prompt: str, session_key: Optional[str] = None) -> str:
-    """Send a prompt to the gateway via the OpenAI-compatible HTTP endpoint."""
+    """Send a prompt to the gateway via the OpenAI-compatible HTTP endpoint.
+
+    Includes retry logic for transient failures during cold-start warmup.
+    The gateway may be "ready" (health endpoint responds) but still loading
+    model configs or completing first-request initialization, which can cause
+    initial 500/502 errors on the very first request.
+    """
     if not _wait_for_gateway():
         return "Error: OpenClaw gateway did not start within timeout."
 
@@ -144,37 +166,53 @@ def _invoke_gateway(prompt: str, session_key: Optional[str] = None) -> str:
         "x-openclaw-session-key": session_key,
     }
 
-    req = Request(GATEWAY_HTTP_URL, data=payload, headers=headers, method="POST")
-
-    try:
-        with urlopen(req, timeout=290) as resp:
-            data = json.loads(resp.read().decode())
-            # Extract text from OpenResponses format
-            for item in data.get("output", []):
-                if item.get("type") == "message":
-                    for content in item.get("content", []):
-                        if content.get("type") == "output_text":
-                            return content.get("text", "")
-            # Fallback: return serialized output if no output_text found
-            return json.dumps(data.get("output", data))
-    except HTTPError as e:
-        body = ""
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        req = Request(GATEWAY_HTTP_URL, data=payload, headers=headers, method="POST")
         try:
-            body = e.read().decode()[:500]
-        except Exception:
-            pass
-        return f"Error: Gateway returned HTTP {e.code}: {body or e.reason}"
-    except URLError as e:
-        return f"Error: Gateway request failed: {e.reason}"
-    except json.JSONDecodeError as e:
-        return f"Error: Invalid JSON response from gateway: {e}"
-    except Exception as e:
-        return f"Error: {e}"
+            with urlopen(req, timeout=290) as resp:
+                data = json.loads(resp.read().decode())
+                # Extract text from OpenResponses format
+                for item in data.get("output", []):
+                    if item.get("type") == "message":
+                        for content in item.get("content", []):
+                            if content.get("type") == "output_text":
+                                return content.get("text", "")
+                # Fallback: return serialized output if no output_text found
+                return json.dumps(data.get("output", data))
+        except HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode()[:500]
+            except Exception:
+                pass
+            if attempt < max_retries and e.code >= 500:
+                print(f"[main.py] Gateway returned {e.code}, retrying ({attempt + 1}/{max_retries})...")
+                time.sleep(3)
+                continue
+            return f"Error: Gateway returned HTTP {e.code}: {body or e.reason}"
+        except URLError as e:
+            if attempt < max_retries:
+                print(f"[main.py] Gateway request failed: {e.reason}, retrying ({attempt + 1}/{max_retries})...")
+                time.sleep(3)
+                continue
+            return f"Error: Gateway request failed: {e.reason}"
+        except json.JSONDecodeError as e:
+            return f"Error: Invalid JSON response from gateway: {e}"
+        except Exception as e:
+            return f"Error: {e}"
+    return "Error: All retry attempts exhausted."
 
 
 # --- Startup sequence ---
 _initialize_workspace()
-_load_channel_secrets()
+# In webhook-only mode (recommended), CHANNEL_SECRETS_ARN is not set.
+# The Lambda router handles all Telegram I/O externally.
+# Only load channel secrets for legacy polling mode.
+if os.environ.get("CHANNEL_SECRETS_ARN"):
+    _load_channel_secrets()
+else:
+    print("[main.py] Webhook-only mode -- no channel polling configured.")
 _start_gateway()
 
 
