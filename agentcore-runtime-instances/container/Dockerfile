@@ -64,7 +64,11 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 ENV OPENCLAW_HOME=/home/agent/.openclaw
 ENV AGENTCORE_PORT=8080
 ENV NODE_ENV=production
-ENV CHANNEL_SECRETS_ARN=openclaw/channels
+# CHANNEL_SECRETS_ARN is intentionally NOT set here. Default is webhook-only
+# mode (Channel Router handles Telegram/Discord/Slack externally). Set this
+# env var explicitly at the capacity-provider/runtime level only if you want
+# the container to poll channels directly instead (legacy mode, incompatible
+# with the Channel Router — see docs/CONFIGURATION.md).
 
 # Run as root — AgentCore manages the security boundary at the instance/session level.
 # The EBS volume mounted by AgentCore is owned by root.

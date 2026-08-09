@@ -50,6 +50,12 @@ User message → Channel webhook → Lambda → invoke-agent-runtime (wakes inst
 
 **Measured cold-start timing:** warm-instance calls return in ~4s end-to-end (webhook -> worker -> AgentCore -> Telegram). Cold-start recovery, measured on an SSM-confirmed cold instance via the real webhook path with no retry needed: **91s** from webhook receipt to confirmed response. The Lambda retries the same `runtimeSessionId` on a schedule covering ~255s total as headroom for slower boots; this does not trigger competing/duplicate cold starts since AgentCore routes repeated calls with the same session ID to the same provisioning instance.
 
+Of that 91s, container/gateway startup accounts for ~5s; the remainder is EC2
+instance provisioning (AWS-managed, not reducible via container/application
+changes). See [Channel Router — Speeding up cold start](CHANNEL_ROUTER.md#speeding-up-cold-start)
+for the two available mitigations (longer rolling idle timeout, scheduled
+keep-warm pings) and their cost tradeoffs.
+
 **Before:** Bot stops responding after idle timeout. No recovery without manual intervention.
 **After:** Bot always responds. Warm-instance replies in seconds; cold-start replies in under two minutes with user-visible feedback throughout.
 

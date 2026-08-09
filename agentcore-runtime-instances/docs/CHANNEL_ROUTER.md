@@ -109,6 +109,74 @@ call. This is expected and handled by the outer Lambda-side retry loop, not a
 bug — it only becomes a problem if the retry window doesn't cover the actual
 cold-start time.
 
+### Where cold-start time actually goes
+
+Measured from container CloudWatch logs (`/aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT`)
+during a real cold start:
+
+| Phase | Duration |
+|-------|----------|
+| EC2 instance provisioning (webhook received → container starts) | ~79s |
+| S3 restore (workspace/npm/agents tarballs) | ~1s |
+| OpenClaw gateway startup to ready | ~2.5s |
+| **Total** | **~91s** (measured) |
+
+The container and gateway are already fast (~5s combined). The dominant cost
+is AWS provisioning a new EC2 instance, which is managed infrastructure
+outside the container/Lambda code — not something reducible by optimizing
+the image or application startup.
+
+### Speeding up cold start
+
+Two approaches reduce how often you hit the ~91s cold-start path. Both work
+by avoiding the idle-stop condition rather than making the cold start itself
+faster (which isn't practically controllable — see above).
+
+**1. Longer idle timeout (rolling window)**
+
+`idleRuntimeSessionTimeout` resets on every `invoke-agent-runtime` call — it
+is a rolling window, not a fixed duration from first activity. A longer
+value means the instance stays warm across any gap shorter than the
+timeout, and only cold-starts after a gap longer than it:
+
+```bash
+aws bedrock-agentcore-control update-agent-runtime \
+  --agent-runtime-id <RUNTIME_ID> \
+  --lifecycle-configuration '{"idleRuntimeSessionTimeout": 14400}' \
+  --agent-runtime-artifact '{"containerConfiguration":{"containerUri":"<ECR_URI>"}}' \
+  --role-arn "<EXECUTION_ROLE_ARN>" \
+  --capacity-provider-configuration '{"capacityProviderArn":"<CP_ARN>"}' \
+  --region us-east-1
+```
+
+Tradeoff: EC2 cost accrues for the full window even if you send one message
+and go silent for hours within it. See [Runtime Behavior](RUNTIME_BEHAVIOR.md#idle-timeout-and-what-keeps-the-session-alive)
+for recommended values per use case.
+
+**2. Scheduled keep-warm ping**
+
+A recurring `invoke-agent-runtime` call during hours you're likely to use
+the bot keeps the rolling idle window from expiring, without paying for
+24/7 uptime. Example: a cron job every 10 minutes from 8am-10pm sends a
+lightweight prompt (e.g. `"ping"`) directly to the runtime:
+
+```bash
+aws bedrock-agentcore invoke-agent-runtime \
+  --agent-runtime-arn <RUNTIME_ARN> \
+  --runtime-session-id <SESSION_ID> \
+  --payload "$(echo -n '{"prompt":"ping"}' | base64)" \
+  --content-type "application/json" \
+  --region us-east-1 /dev/null
+```
+
+This keeps the instance warm only during the scheduled hours — outside that
+window, the instance still auto-stops and the next message pays the full
+cold-start cost. Combine with a short `idleRuntimeSessionTimeout` (e.g. 900s)
+so the instance stops quickly once the keep-warm schedule ends.
+
+Both approaches trade EC2 cost for reduced cold-start frequency; neither
+reduces the ~91s cost of an actual cold start when one does occur.
+
 ### Warm instance behaviour
 
 When the instance is already running (message within the 4-hour rolling idle
