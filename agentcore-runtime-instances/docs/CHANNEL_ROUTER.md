@@ -54,48 +54,34 @@ The router tracks last successful invocation in DynamoDB. When `elapsed > idle_t
 
 Warm instance: no status message, just typing indicator + fast response.
 
-## Cold-Start Behaviour (Evidence-Based)
+## Cold-Start Behaviour
 
-### The actual root cause of unreliable cold-start delivery (fixed 2026-08-09)
+### Response parsing
 
-Every prior version of this router had a silent bug: `invoke_agent_runtime`'s
-response payload comes back under the **`"response"`** key (a
-`botocore.response.StreamingBody`), not `"body"`. The Lambda code checked
-`resp.get("body")`, which is **always `None`** for this API. Confirmed by
-direct boto3 reproduction:
+`invoke_agent_runtime`'s response payload comes back under the **`"response"`**
+key (a `botocore.response.StreamingBody`), not `"body"`:
 
 ```python
 >>> resp.keys()
 dict_keys(['ResponseMetadata', 'runtimeSessionId', 'contentType', 'statusCode', 'response'])
 ```
 
-Because of this, `invoke_agent()` returned `None` on **every single call**,
-regardless of whether the container actually replied. The retry loop then
-kept firing for its entire configured window every time, even when the
-underlying call had already succeeded in 1-4 seconds. This is why:
+`core.py`'s `invoke_agent()` reads `resp["response"]`, calls `.read()`,
+decodes, and parses the `data: {"result": ...}` SSE-style payload the
+container emits. A wrong key here would silently return `None` on every
+call, success or failure, since a KeyError-free `.get()` on the wrong key
+produces no exception to catch.
 
-- Direct CLI invocations always "worked" (the CLI reads the stream correctly)
-- Extending the retry window (10s → 120s → 180s → 260s) never fixed reliability
-  — it only changed the odds that the *last* retry happened to land after the
-  instance finished booting
-- No exceptions were ever logged — a wrong dict key is not an error
+### Warm vs cold latency
 
-**Fix:** read `resp["response"]` (a `StreamingBody`), call `.read()`, decode,
-and parse the `data: {"result": ...}` SSE-style payload. See `core.py`
-`invoke_agent()`.
+On a **warm** instance, `invoke_agent_runtime` returns on the first attempt
+in roughly 1-5 seconds end-to-end (webhook handler + async worker +
+AgentCore + Telegram send).
 
-### Measured behaviour after the fix
-
-On a **warm** instance, `invoke_agent_runtime` now returns correctly on the
-first attempt in **1-4 seconds** (measured: 3.17s and 3.65s across two
-consecutive validation runs through the live webhook path).
-
-On a **cold** instance, AgentCore's `invoke_agent_runtime` **fails fast**
-(does not block/queue) while the EC2 instance is provisioning and the
-container is booting. Observed cold-start wall-clock time before the
-invocation starts succeeding has ranged from roughly 60s up to 235s+ across
-different test runs — it is not a fixed number. Contributing factors
-observed during investigation:
+On a **cold** instance, `invoke_agent_runtime` **fails fast** (does not
+block/queue) while the EC2 instance is provisioning and the container is
+booting. Cold-start wall-clock time before the invocation starts succeeding
+ranges roughly 60s-235s depending on:
 
 - EC2 instance launch + container pull time
 - OpenClaw gateway subprocess startup (workspace load, model config, plugin discovery)
@@ -108,7 +94,7 @@ Each retry is a fresh `invoke_agent_runtime` call against the *same*
 instance rather than starting a new one, so retries don't cause competing
 cold starts.
 
-### Why "LLM request failed" or RuntimeClientError 400 can still appear briefly
+### Why "LLM request failed" or RuntimeClientError 400 can appear briefly
 
 AgentCore can route a request to the container as soon as its port is
 listening, before the OpenClaw gateway inside has finished starting. The
@@ -224,16 +210,4 @@ Lambda role requires:
 | 403 on webhook | Secret token mismatch | Verify `WEBHOOK_SECRET_TOKEN` matches setWebhook |
 | Response takes 1-4 min | Instance cold-starting from idle (expected, not a bug) | Normal for first message after 15-min idle; see Cold-Start Behaviour above |
 | DynamoDB error in logs | Table missing or IAM insufficient | Create table; check IAM policy |
-| Webhook silently disappears | Container's own Telegram channel config got restored/re-synced from EBS/S3 and started polling | Strip `channels` from persisted `openclaw.json`; container's `_strip_channels_for_webhook_mode()` (main.py) now does this on every boot when `CHANNEL_SECRETS_ARN` is unset |
-
-## Cost
-
-| Component | Cost |
-|-----------|------|
-| Lambda (webhook + worker) | ~$0/mo (free tier covers typical personal use) |
-| API Gateway | ~$0/mo (first 1M requests free) |
-| DynamoDB | ~$0/mo (single item, on-demand) |
-| EC2 (c7g.large, only when active) | ~$0.068/hr |
-| Bedrock (Claude Sonnet 4.6) | Per-token pricing |
-
-**Idle cost: $0.** Only pay when actively conversing.
+| Webhook silently disappears | Container's own Telegram channel config got restored/re-synced from EBS/S3 and started polling | Strip `channels` from persisted `openclaw.json`; container's `_strip_channels_for_webhook_mode()` (main.py) does this on every boot when `CHANNEL_SECRETS_ARN` is unset |

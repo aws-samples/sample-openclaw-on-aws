@@ -45,8 +45,8 @@ User message → Channel webhook → Lambda → invoke-agent-runtime (wakes inst
 - **Multi-channel** — same Lambda handles Telegram, Discord, Slack via channel adapters. AgentCore invocation is channel-agnostic.
 - **15-min idle timeout** — `idleRuntimeSessionTimeout: 900`. Instance shuts down fast for cost savings, wakes on demand. Zero cost when idle.
 
-**Critical implementation detail (found via direct reproduction, not initially obvious):**
-`invoke_agent_runtime`'s streamed payload is returned under the boto3 response key **`"response"`** (a `StreamingBody`), not `"body"`. Using the wrong key makes every call silently return nothing regardless of success — no exception is raised, so it looks like a timing/reliability problem when it is actually a response-parsing bug. This cost multiple debugging iterations before being caught by directly inspecting `resp.keys()` from a throwaway boto3 script rather than trusting the SDK's shape from memory.
+**Implementation detail:**
+`invoke_agent_runtime`'s streamed payload is returned under the boto3 response key **`"response"`** (a `StreamingBody`), not `"body"`. Using the wrong key makes every call silently return nothing regardless of success — no exception is raised, so a response-parsing bug can look like a timing/reliability problem. Verify the actual key by inspecting `resp.keys()` directly rather than assuming the SDK's shape from memory.
 
 **Measured cold-start timing:** warm-instance calls return in 1-4s. Cold-start wall-clock time (before `invoke_agent_runtime` starts succeeding) has been observed ranging ~60s–235s+ across runs — not a fixed number. The Lambda retries the same `runtimeSessionId` on a schedule covering ~255s total; this does not trigger competing/duplicate cold starts since AgentCore routes repeated calls with the same session ID to the same provisioning instance.
 
