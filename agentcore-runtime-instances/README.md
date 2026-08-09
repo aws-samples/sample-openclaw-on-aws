@@ -74,13 +74,15 @@ python3 scripts/deploy.sh
 Deploy the Lambda router for channels that work across instance idle-stop-wake cycles:
 
 ```bash
-# Telegram (one command)
-./scripts/deploy-telegram-router.sh "YOUR_BOT_TOKEN" "YOUR_TELEGRAM_USER_ID"
+# Telegram
+./scripts/deploy-channel-router.sh \
+  --runtime-arn arn:aws:bedrock-agentcore:us-east-1:<ACCOUNT_ID>:runtime/<RUNTIME_ID> \
+  --telegram-token "YOUR_BOT_TOKEN" --telegram-allowed-ids "YOUR_TELEGRAM_USER_ID"
 ```
 
-This deploys a Lambda + API Gateway that receives webhooks, wakes the instance on-demand via `invoke-agent-runtime`, and replies directly. The bot responds even after hours of inactivity — first message after idle takes ~60-90s (cold start), subsequent messages 5-15s.
+This deploys a Lambda + API Gateway that receives webhooks, wakes the instance on-demand via `invoke-agent-runtime`, and replies directly. The bot responds even after hours of inactivity — first message after idle takes 60-235s (cold start), subsequent messages a few seconds.
 
-**Supported channels:** Telegram, Discord, Slack. See [Channel Router docs](docs/CHANNEL_ROUTER.md) for multi-channel setup.
+**Supported channels:** Telegram, Discord, Slack — pass `--discord-token`/`--slack-token` (with their required companion flags) to enable them in the same deployment. See [Channel Router docs](docs/CHANNEL_ROUTER.md) for full multi-channel setup.
 
 ```
 User message → Webhook → Lambda → invoke-agent-runtime (wakes instance) → reply
@@ -151,7 +153,7 @@ Once approved, the channel is fully active and subsequent messages flow directly
 │       ├── discord.py          # Interactions endpoint, deferred responses
 │       └── slack.py            # Events API, chat.postMessage/update
 ├── docs/                       # Architecture, configuration, cost, runtime, channel router
-└── scripts/                    # deploy.sh, deploy-telegram-router.sh, connect-channel.sh
+└── scripts/                    # deploy.sh, deploy-channel-router.sh, connect-channel.sh
 ```
 
 ## Security

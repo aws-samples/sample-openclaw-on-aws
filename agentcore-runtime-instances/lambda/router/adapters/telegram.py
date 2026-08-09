@@ -13,7 +13,7 @@ from urllib.error import URLError
 
 logger = logging.getLogger()
 
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 WEBHOOK_SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET_TOKEN", "")
 ALLOWED_USER_IDS = os.environ.get("ALLOWED_USER_IDS", "").split(",")
 

@@ -137,39 +137,44 @@ timeout):
 
 ## Deployment
 
-### Quick deploy (Telegram only)
+### Shell script (recommended for single-account personal use)
 
 ```bash
-./scripts/deploy-telegram-router.sh "BOT_TOKEN" "ALLOWED_USER_IDS"
+# Telegram
+./scripts/deploy-channel-router.sh \
+  --runtime-arn <RUNTIME_ARN> \
+  --telegram-token "<BOT_TOKEN>" --telegram-allowed-ids "<USER_ID>"
+
+# Multiple channels in one deployment
+./scripts/deploy-channel-router.sh \
+  --runtime-arn <RUNTIME_ARN> \
+  --telegram-token "<BOT_TOKEN>" \
+  --slack-token "<xoxb-...>" --slack-signing-secret "<SECRET>" \
+  --discord-token "<BOT_TOKEN>" --discord-public-key "<KEY>" --discord-app-id "<APP_ID>"
 ```
 
-### CDK (all channels)
+The script provisions the IAM role, DynamoDB cold-start table, Lambda
+function (with bundled boto3), one API Gateway route per enabled channel,
+and registers the Telegram webhook automatically. Discord and Slack print
+the endpoint URL to paste into their respective developer consoles (see
+"Supported Channels" below for where).
+
+Run `./scripts/deploy-channel-router.sh --help` for the full flag list.
+
+### CDK (for infrastructure-as-code deployments)
 
 ```bash
 cd agentcore-runtime-instances
 cdk deploy OpenClaw-LambdaRouter
 ```
 
-### Set idle timeout (15 min recommended)
+`stacks/lambda_router_stack.py` accepts the same channel credentials as
+constructor parameters and provisions identical resources.
 
-```bash
-aws bedrock-agentcore-control update-agent-runtime \
-  --agent-runtime-id <RUNTIME_ID> \
-  --lifecycle-configuration '{"idleRuntimeSessionTimeout": 900}' \
-  --agent-runtime-artifact '{"containerConfiguration":{"containerUri":"<ECR_URI>"}}' \
-  --role-arn "<EXECUTION_ROLE_ARN>" \
-  --capacity-provider-configuration '{"capacityProviderArn":"<CP_ARN>"}' \
-  --region us-east-1
-```
+### Idle timeout
 
-### Set Telegram webhook
-
-```bash
-curl "https://api.telegram.org/bot<TOKEN>/setWebhook" \
-  -d "url=https://<API_ID>.execute-api.us-east-1.amazonaws.com/webhook/telegram" \
-  -d "secret_token=<SECRET>" \
-  -d 'allowed_updates=["message","edited_message"]'
-```
+The router relies on the AgentCore runtime's `idleRuntimeSessionTimeout` to
+control cost vs cold-start frequency. See [Runtime Behavior](RUNTIME_BEHAVIOR.md#idle-timeout-and-what-keeps-the-session-alive) for configuration and recommended values.
 
 ## Container Configuration
 
