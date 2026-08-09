@@ -6,7 +6,6 @@ Handles:
 - Retry logic for transient failures during instance warm-up
 """
 
-import base64
 import json
 import logging
 import os
@@ -54,7 +53,6 @@ def is_likely_cold_start(session_id: str = None) -> bool:
     Returns True if the instance is probably cold and will need to boot.
     """
     if not COLDSTART_TABLE:
-        # No tracking table — assume cold if we can't tell
         return True
 
     session_id = session_id or SESSION_ID
@@ -66,14 +64,14 @@ def is_likely_cold_start(session_id: str = None) -> bool:
         )
         item = resp.get("Item")
         if not item:
-            return True  # Never invoked before — definitely cold
+            return True
 
         last_success = int(item["last_success_epoch"]["N"])
         elapsed = time.time() - last_success
         return elapsed > IDLE_TIMEOUT_SECONDS
-    except Exception as e:
-        logger.warning("Cold-start check failed: %s", e)
-        return True  # Assume cold on error
+    except Exception as exc:
+        logger.warning("Cold-start check failed: %s", exc)
+        return True
 
 
 def record_success(session_id: str = None):
@@ -90,8 +88,8 @@ def record_success(session_id: str = None):
                 "last_success_epoch": {"N": str(int(time.time()))},
             },
         )
-    except Exception as e:
-        logger.warning("Failed to record success: %s", e)
+    except Exception as exc:
+        logger.warning("Failed to record success: %s", exc)
 
 
 def invoke_agent(message_text: str, session_id: str = None) -> str | None:
@@ -101,57 +99,76 @@ def invoke_agent(message_text: str, session_id: str = None) -> str | None:
     """
     session_id = session_id or SESSION_ID
     payload = json.dumps({"prompt": message_text}).encode()
-    payload_b64 = base64.b64encode(payload).decode()
 
     try:
         resp = _get_agentcore_client().invoke_agent_runtime(
             agentRuntimeArn=AGENTCORE_RUNTIME_ARN,
             runtimeSessionId=session_id,
-            payload=payload_b64,
+            payload=payload,
+            contentType="application/json",
         )
-        body = resp.get("body")
-        if body:
-            result = ""
-            for event in body:
-                if "chunk" in event:
-                    chunk_bytes = event["chunk"].get("bytes", b"")
-                    result += chunk_bytes.decode("utf-8", errors="replace")
-            # Parse response — handler returns data: {"result": "text"}
-            try:
-                text = result.split("data: ", 1)[-1] if "data: " in result else result
-                data = json.loads(text)
-                return data.get("result", result)
-            except (json.JSONDecodeError, IndexError):
-                return result if result else None
+    except Exception as exc:
+        logger.error("AgentCore invocation failed: %s", exc, exc_info=True)
         return None
-    except Exception as e:
-        logger.error("AgentCore invocation failed: %s", e, exc_info=True)
+
+    # ROOT CAUSE (confirmed via direct boto3 repro, 2026-08-09):
+    # invoke_agent_runtime's streamed payload comes back under the
+    # "response" key (a botocore.response.StreamingBody), NOT "body".
+    # resp.keys() == ['ResponseMetadata', 'runtimeSessionId', 'contentType',
+    # 'statusCode', 'response']. Every previous version of this function
+    # checked resp.get("body"), which is always None, so invoke_agent
+    # silently returned None on EVERY call -- success or failure -- even
+    # when the container had already replied correctly within seconds.
+    # The retry loop then kept firing for the full ~260s window regardless
+    # of whether the underlying invocation actually succeeded, which is why
+    # cold-start "reliability" looked random: it depended entirely on
+    # whether the LAST retry happened to land after the instance was warm,
+    # not on whether any individual attempt succeeded.
+    stream = resp.get("response")
+    if stream is None:
+        logger.error("invoke_agent_runtime response missing 'response' stream: %s", list(resp.keys()))
         return None
+
+    raw = stream.read()
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    if not raw:
+        return None
+
+    # Handler emits Server-Sent-Events style: 'data: {"result": "text"}\n\n'
+    try:
+        text = raw.split("data: ", 1)[-1] if "data: " in raw else raw
+        data = json.loads(text)
+        return data.get("result", raw)
+    except (json.JSONDecodeError, IndexError):
+        return raw
 
 
 def invoke_with_retry(message_text: str, session_id: str = None) -> str:
     """Invoke AgentCore with retry logic for cold starts.
 
-    Cold starts take 60-90s. This retries with exponential backoff over ~120s
-    to cover the full boot window: instance provisioning + container start +
-    gateway initialization + model warmup.
-
-    Retry schedule: 0s, +15s, +25s, +35s, +45s = ~120s total coverage.
+    With the response-parsing bug fixed, a single invoke_agent_runtime call
+    that lands on a warm instance now returns correctly on the FIRST
+    attempt. Retries only matter for genuine cold starts, where AgentCore
+    fails fast (RuntimeClientError/ResourceNotFoundException) while the
+    instance is still provisioning/booting -- it does not block/queue.
+    Observed cold-start wall-clock time has ranged roughly 60s-235s across
+    test runs, so the schedule below covers ~4-5 minutes of wall-clock time.
     """
     session_id = session_id or SESSION_ID
 
-    delays = [0, 15, 25, 35, 45]  # seconds between attempts
+    delays = [0, 15, 20, 25, 30, 35, 40, 45, 45]  # ~255s total coverage
 
-    for attempt, delay in enumerate(delays):
+    for attempt, delay in enumerate(delays, start=1):
         if delay > 0:
-            logger.info("Attempt %d failed, retrying in %ds...", attempt, delay)
             time.sleep(delay)
 
         response = invoke_agent(message_text, session_id)
         if response is not None:
-            # Record successful invocation for cold-start tracking
             record_success(session_id)
             return response
+
+        logger.info("Attempt %d/%d returned no response, will retry.", attempt, len(delays))
 
     return (
         "Sorry, the instance failed to respond after multiple attempts. "

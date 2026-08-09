@@ -74,19 +74,41 @@ def parse_inbound(event: dict) -> dict | None:
 
 
 def send_message(chat_id, text, reply_to=None) -> dict | None:
-    """Send a message. Returns the Telegram result object or None."""
+    """Send a message. Returns the Telegram result object or None.
+
+    Falls back to sending without reply_to if the first attempt fails
+    (e.g., original message too old or deleted).
+    """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text[:4096]}
     if reply_to:
         payload["reply_to_message_id"] = reply_to
+        payload["allow_sending_without_reply"] = True
     data = json.dumps(payload).encode()
     req = urllib_request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
         resp = urllib_request.urlopen(req, timeout=10)
         result = json.loads(resp.read().decode())
         return result.get("result")
-    except (URLError, json.JSONDecodeError) as e:
+    except URLError as e:
+        # If reply_to caused the failure, retry without it
+        if reply_to:
+            logger.warning("Send with reply_to failed (%s), retrying without...", e)
+            payload.pop("reply_to_message_id", None)
+            payload.pop("allow_sending_without_reply", None)
+            data = json.dumps(payload).encode()
+            req = urllib_request.Request(url, data=data, headers={"Content-Type": "application/json"})
+            try:
+                resp = urllib_request.urlopen(req, timeout=10)
+                result = json.loads(resp.read().decode())
+                return result.get("result")
+            except (URLError, json.JSONDecodeError) as e2:
+                logger.error("Failed to send Telegram message (retry): %s", e2)
+                return None
         logger.error("Failed to send Telegram message: %s", e)
+        return None
+    except json.JSONDecodeError as e:
+        logger.error("Invalid response from Telegram: %s", e)
         return None
 
 

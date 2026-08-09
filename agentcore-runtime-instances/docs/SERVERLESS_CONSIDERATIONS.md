@@ -40,15 +40,20 @@ User message → Channel webhook → Lambda → invoke-agent-runtime (wakes inst
 ```
 
 **Key design decisions:**
-- **Async self-invoke pattern** — webhook handler returns 200 in <2s, fires worker async. Handles API Gateway 30s limit + Telegram 60s webhook timeout + AgentCore cold starts (60-90s).
+- **Async self-invoke pattern** — webhook handler returns 200 in <2s, fires worker async. Handles API Gateway 30s limit + Telegram 60s webhook timeout + AgentCore cold starts (variable, see below).
 - **Cold-start UX** — DynamoDB tracks last invocation; if idle timeout exceeded, sends "⏳ Waking up..." status message, edits with real response when ready.
 - **Multi-channel** — same Lambda handles Telegram, Discord, Slack via channel adapters. AgentCore invocation is channel-agnostic.
 - **15-min idle timeout** — `idleRuntimeSessionTimeout: 900`. Instance shuts down fast for cost savings, wakes on demand. Zero cost when idle.
 
-**Before:** Bot stops responding after idle timeout. No recovery without manual intervention.
-**After:** Bot always responds. Cold start takes 60-90s with user-visible feedback. Subsequent messages: 5-15s.
+**Critical implementation detail (found via direct reproduction, not initially obvious):**
+`invoke_agent_runtime`'s streamed payload is returned under the boto3 response key **`"response"`** (a `StreamingBody`), not `"body"`. Using the wrong key makes every call silently return nothing regardless of success — no exception is raised, so it looks like a timing/reliability problem when it is actually a response-parsing bug. This cost multiple debugging iterations before being caught by directly inspecting `resp.keys()` from a throwaway boto3 script rather than trusting the SDK's shape from memory.
 
-See [Channel Router docs](CHANNEL_ROUTER.md) for full architecture.
+**Measured cold-start timing:** warm-instance calls return in 1-4s. Cold-start wall-clock time (before `invoke_agent_runtime` starts succeeding) has been observed ranging ~60s–235s+ across runs — not a fixed number. The Lambda retries the same `runtimeSessionId` on a schedule covering ~255s total; this does not trigger competing/duplicate cold starts since AgentCore routes repeated calls with the same session ID to the same provisioning instance.
+
+**Before:** Bot stops responding after idle timeout. No recovery without manual intervention.
+**After:** Bot always responds. Warm-instance replies in a few seconds; cold-start replies typically within 1-4 minutes with user-visible feedback throughout.
+
+See [Channel Router docs](CHANNEL_ROUTER.md) for full architecture and evidence.
 
 ## 3. Slow Gateway Startup (No Lazy Init)
 

@@ -54,66 +54,80 @@ The router tracks last successful invocation in DynamoDB. When `elapsed > idle_t
 
 Warm instance: no status message, just typing indicator + fast response.
 
-## Cold-Start Behaviour (Documented)
+## Cold-Start Behaviour (Evidence-Based)
 
-### What happens during a cold start
+### The actual root cause of unreliable cold-start delivery (fixed 2026-08-09)
 
-```
-t=0s     User sends message
-t=0.5s   Lambda receives webhook, detects cold start via DynamoDB
-t=0.7s   Lambda sends "⏳ Waking up..." to user, fires async worker
-t=1s     Worker calls invoke-agent-runtime
-t=1-5s   AgentCore starts provisioning EC2 instance
-t=30-60s Instance boots, container starts, BedrockAgentCoreApp binds :8080
-t=60-70s AgentCore routes request to container
-t=60-80s OpenClaw gateway starting (loading plugins, models, workspace)
-t=70-90s Gateway ready, processes prompt, calls Bedrock
-t=80-95s Response returned, Lambda edits "⏳" message with real response
+Every prior version of this router had a silent bug: `invoke_agent_runtime`'s
+response payload comes back under the **`"response"`** key (a
+`botocore.response.StreamingBody`), not `"body"`. The Lambda code checked
+`resp.get("body")`, which is **always `None`** for this API. Confirmed by
+direct boto3 reproduction:
+
+```python
+>>> resp.keys()
+dict_keys(['ResponseMetadata', 'runtimeSessionId', 'contentType', 'statusCode', 'response'])
 ```
 
-### The 400 error during boot (and why retries are needed)
+Because of this, `invoke_agent()` returned `None` on **every single call**,
+regardless of whether the container actually replied. The retry loop then
+kept firing for its entire configured window every time, even when the
+underlying call had already succeeded in 1-4 seconds. This is why:
 
-AgentCore routes requests to the container **as soon as port 8080 is listening**. But the OpenClaw gateway inside the container hasn't finished starting yet:
+- Direct CLI invocations always "worked" (the CLI reads the stream correctly)
+- Extending the retry window (10s → 120s → 180s → 260s) never fixed reliability
+  — it only changed the odds that the *last* retry happened to land after the
+  instance finished booting
+- No exceptions were ever logged — a wrong dict key is not an error
 
-```
-invoke-agent-runtime → AgentCore → container:8080 (up) → gateway:18789 (NOT ready)
-                                                          ↓
-                                                        HTTP 400 / "LLM request failed"
-                                                          ↓
-                                                        RuntimeClientError 400 → Lambda
-```
+**Fix:** read `resp["response"]` (a `StreamingBody`), call `.read()`, decode,
+and parse the `data: {"result": ...}` SSE-style payload. See `core.py`
+`invoke_agent()`.
 
-**Container-side mitigation:** Two-phase health check in `main.py`:
-1. Wait for gateway HTTP port to respond (process is up)
-2. Send a test prompt to verify LLM requests actually work (models loaded)
+### Measured behaviour after the fix
 
-The handler blocks until both phases pass, preventing premature 400 responses.
+On a **warm** instance, `invoke_agent_runtime` now returns correctly on the
+first attempt in **1-4 seconds** (measured: 3.17s and 3.65s across two
+consecutive validation runs through the live webhook path).
 
-**Lambda-side mitigation:** 5 retry attempts over ~120s (delays: 0, 15, 25, 35, 45s). Covers the full cold-start window even if the container-side check fails.
+On a **cold** instance, AgentCore's `invoke_agent_runtime` **fails fast**
+(does not block/queue) while the EC2 instance is provisioning and the
+container is booting. Observed cold-start wall-clock time before the
+invocation starts succeeding has ranged from roughly 60s up to 235s+ across
+different test runs — it is not a fixed number. Contributing factors
+observed during investigation:
 
-### Retry schedule
+- EC2 instance launch + container pull time
+- OpenClaw gateway subprocess startup (workspace load, model config, plugin discovery)
+- Occasional S3 restore path when the workspace isn't already on EBS
 
-| Attempt | Cumulative time | Expected state |
-|---------|----------------|----------------|
-| 1 | 0s | Instance provisioning |
-| 2 | 15s | Instance booting |
-| 3 | 40s | Container starting, gateway loading |
-| 4 | 75s | Gateway ready or nearly ready |
-| 5 | 120s | Should definitely be ready |
+**Retry strategy:** the Lambda retries with a schedule covering ~255s total
+(`core.py` `invoke_with_retry`: delays of 0, 15, 20, 25, 30, 35, 40, 45, 45s).
+Each retry is a fresh `invoke_agent_runtime` call against the *same*
+`runtimeSessionId` — AgentCore routes it to the same provisioning/booting
+instance rather than starting a new one, so retries don't cause competing
+cold starts.
 
-### Why "LLM request failed" can leak to users
+### Why "LLM request failed" or RuntimeClientError 400 can still appear briefly
 
-If all 5 attempts fail (instance took >120s or has a configuration error), the Lambda sends a user-friendly error. However, if the container returns the raw gateway error (e.g., "LLM request failed") as a successful response (HTTP 200), the Lambda forwards it as-is.
-
-**Prevention:** The container's `_invoke_gateway()` retries 5xx errors internally and only returns clean error strings on total failure.
+AgentCore can route a request to the container as soon as its port is
+listening, before the OpenClaw gateway inside has finished starting. The
+container's `_invoke_gateway()` (main.py) waits for the gateway's health
+endpoint and retries 5xx responses internally, but a request that arrives
+during the narrow window between "container up" and "gateway ready" can still
+surface as a `RuntimeClientError 400` back to the Lambda's `invoke_agent`
+call. This is expected and handled by the outer Lambda-side retry loop, not a
+bug — it only becomes a problem if the retry window doesn't cover the actual
+cold-start time.
 
 ### Warm instance behaviour
 
-When the instance is already running (message within 15-min idle timeout):
-- DynamoDB shows recent success → no "⏳" message shown
-- Worker calls invoke-agent-runtime → routes immediately to running container
-- Gateway already loaded → prompt processed in 5-15s
-- Response sent directly (no message editing)
+When the instance is already running (message within the 15-min idle
+timeout):
+- DynamoDB shows recent success → no "⏳ Waking up" message shown, just typing indicator
+- `invoke_agent_runtime` routes immediately to the running container
+- Gateway already loaded → prompt processed and reply delivered in ~2-5s total
+  (webhook handler + worker + AgentCore + Telegram send)
 
 ## Supported Channels
 
@@ -205,11 +219,12 @@ Lambda role requires:
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| "Sorry, I'm having trouble" | AgentCore returned RuntimeClientError 400 | Instance gateway not ready; wait 60s, retry |
-| No response at all | Webhook not set or API Gateway misconfigured | Check `getWebhookInfo`; verify route exists |
+| "Sorry, the instance failed to respond" | All retry attempts (~255s) exhausted — cold start took longer than the window | Message again; instance is now warm from the attempt |
+| No response at all | Webhook not set, or something is polling `getUpdates` and clearing it | Check `getWebhookInfo`; ensure container has no `channels.telegram` in its persisted config (see below) |
 | 403 on webhook | Secret token mismatch | Verify `WEBHOOK_SECRET_TOKEN` matches setWebhook |
-| Response takes 2+ min | Instance cold-starting from idle | Normal for first message after 15-min idle |
+| Response takes 1-4 min | Instance cold-starting from idle (expected, not a bug) | Normal for first message after 15-min idle; see Cold-Start Behaviour above |
 | DynamoDB error in logs | Table missing or IAM insufficient | Create table; check IAM policy |
+| Webhook silently disappears | Container's own Telegram channel config got restored/re-synced from EBS/S3 and started polling | Strip `channels` from persisted `openclaw.json`; container's `_strip_channels_for_webhook_mode()` (main.py) now does this on every boot when `CHANNEL_SECRETS_ARN` is unset |
 
 ## Cost
 
