@@ -132,25 +132,28 @@ def invoke_agent(message_text: str, session_id: str = None) -> str | None:
 def invoke_with_retry(message_text: str, session_id: str = None) -> str:
     """Invoke AgentCore with retry logic for cold starts.
 
-    Retries once after 10s if the first attempt fails (instance mid-boot).
-    Returns the response text or an error message.
+    Cold starts take 60-90s. This retries with exponential backoff over ~120s
+    to cover the full boot window: instance provisioning + container start +
+    gateway initialization + model warmup.
+
+    Retry schedule: 0s, +15s, +25s, +35s, +45s = ~120s total coverage.
     """
     session_id = session_id or SESSION_ID
 
-    response = invoke_agent(message_text, session_id)
+    delays = [0, 15, 25, 35, 45]  # seconds between attempts
 
-    if response is None:
-        # First attempt failed — instance might be mid-cold-start
-        logger.info("First attempt failed, retrying after 10s...")
-        time.sleep(10)
+    for attempt, delay in enumerate(delays):
+        if delay > 0:
+            logger.info("Attempt %d failed, retrying in %ds...", attempt, delay)
+            time.sleep(delay)
+
         response = invoke_agent(message_text, session_id)
+        if response is not None:
+            # Record successful invocation for cold-start tracking
+            record_success(session_id)
+            return response
 
-    if response is None:
-        return (
-            "Sorry, I'm having trouble right now. "
-            "The instance may be cold-starting. Please try again in ~60 seconds."
-        )
-
-    # Record successful invocation for cold-start tracking
-    record_success(session_id)
-    return response
+    return (
+        "Sorry, the instance failed to respond after multiple attempts. "
+        "It may still be starting up. Please try again in a moment."
+    )
