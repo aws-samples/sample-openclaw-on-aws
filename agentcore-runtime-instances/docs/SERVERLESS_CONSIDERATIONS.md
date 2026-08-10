@@ -100,7 +100,7 @@ See [Channel Router docs](CHANNEL_ROUTER.md) for full architecture and evidence.
 
 **Workarounds for time-sensitive jobs:**
 - **Accept the gap** — For personal assistants, catching up reminders late is better than not at all
-- **Keep instance alive** — Set `idleInstanceTimeout` high enough that periodic cron activity prevents auto-stop
+- **Keep instance alive** — Set `idleRuntimeSessionTimeout` high enough that periodic cron activity prevents auto-stop
 
 ## 6. Channel Reconnection on Resume
 
@@ -110,7 +110,6 @@ See [Channel Router docs](CHANNEL_ROUTER.md) for full architecture and evidence.
 |---------|----------------------|--------|
 | Telegram (long-poll) | ✅ Auto-reconnects with backoff | Messages queued server-side, delivered on resume |
 | Discord (WebSocket) | ⚠️ Known reconnection bugs | May enter infinite reconnect loop; manual restart needed |
-| WhatsApp Web | ⚠️ May require re-pairing | Session can expire during long idle periods |
 | Slack (Socket Mode) | ✅ Auto-reconnects | Buffered messages delivered on resume |
 
 **Impact:** Discord is the primary concern — multiple open issues report failed auto-reconnection after connection drops.

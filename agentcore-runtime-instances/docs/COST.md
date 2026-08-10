@@ -13,4 +13,4 @@
 | **Total (active use)** | **~$55/mo** | Plus token costs |
 | **Total (mostly idle)** | **~$3/mo** | Agent auto-stops, only S3 + EBS costs |
 
-**Cost optimization:** The agent automatically stops when idle (via `idleInstanceTimeout`). You only pay for EC2 while actively using it. When stopped, you only pay for EBS storage (~$2.40/mo) and S3 backup (~pennies). No NAT Gateway — S3 access uses a free VPC Gateway Endpoint and AgentCore manages container internet access.
+**Cost optimization:** The agent automatically stops when idle (via `idleRuntimeSessionTimeout`). You only pay for EC2 while actively using it. When stopped, you only pay for EBS storage (~$2.40/mo) and S3 backup (~pennies). No NAT Gateway — S3 access uses a free VPC Gateway Endpoint and AgentCore manages container internet access.
