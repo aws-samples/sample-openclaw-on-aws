@@ -22,13 +22,15 @@ Enable with:
 
 **Remaining gap:** The Python wrapper still exists for the AgentCore SDK (`bedrock_agentcore` entrypoint). A fully native integration would eliminate Python entirely — OpenClaw could serve the AgentCore protocol (`:8080 /invocations + /ping`) directly.
 
-## 2. Idle-Wake Channel Delivery (Solved: Lambda Router)
+## 2. Idle-Wake Channel Delivery (Workaround: Lambda Router)
 
-**Status: ✅ Resolved (Lambda Router pattern)**
+**Status: ⚠️ Workaround in place — not solved natively**
 
 **Problem:** When the instance auto-stops after idle timeout, outbound channel connections (Telegram polling, Discord WebSocket) die. Incoming messages cannot wake the instance — only `InvokeAgentRuntime` API calls can. Users see silence or stale error messages.
 
-**Solution:** External Lambda router that:
+OpenClaw's gateway has no native way to receive a channel message while stopped, and AgentCore has no native way to accept an inbound channel webhook and translate it into an `invoke-agent-runtime` call. Something outside the instance has to bridge the two.
+
+**Workaround:** External Lambda router that:
 1. Receives channel webhooks (always-on, serverless)
 2. Calls `invoke-agent-runtime` (which cold-starts the instance if stopped)
 3. Sends the response back to the channel directly
@@ -202,7 +204,7 @@ On AWS this maps to Aurora Serverless v2 (scales to zero, pgvector, IAM auth).
 | Consideration | Severity | Workaround | Effort |
 |-----|----------|---------------------|--------|
 | 1. HTTP endpoint | ✅ Resolved | HTTP `/v1/responses` endpoint | Low |
-| 2. Idle-wake channel delivery | ✅ Resolved | Lambda router (webhook → invoke → reply) | Medium |
+| 2. Idle-wake channel delivery | Medium | Workaround: Lambda router (webhook → invoke → reply) — no native solution exists | Medium |
 | 3. Slow startup | High | Wrapper serves health check first | Low |
 | 4. Incomplete graceful shutdown | Medium | SIGTERM trap in start.sh | Low |
 | 5. Cron catch-up timing | Low | Catch-up exists; accept stale jobs | Low |

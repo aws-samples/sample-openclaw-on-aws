@@ -69,9 +69,7 @@ python3 scripts/deploy.sh
 
 ## Connecting Channels
 
-### Recommended: Lambda Router (persistent, survives idle-wake)
-
-Deploy the Lambda router for channels that work across instance idle-stop-wake cycles:
+Deploy the Lambda router to connect Telegram, Discord, or Slack — it wakes the instance on demand and works across instance idle-stop-wake cycles:
 
 ```bash
 # Telegram
@@ -87,19 +85,6 @@ This deploys a Lambda + API Gateway that receives webhooks, wakes the instance o
 ```
 User message → Webhook → Lambda → invoke-agent-runtime (wakes instance) → reply
 ```
-
-### Alternative: Direct Channel Polling (legacy)
-
-For always-on instances (high idle timeout), connect channels directly inside the container:
-
-```bash
-export RUNTIME_ARN="arn:aws:bedrock-agentcore:us-east-1:<ACCOUNT_ID>:runtime/<RUNTIME_ID>"
-./scripts/connect-channel.sh telegram "YOUR_BOT_TOKEN"
-./scripts/connect-channel.sh discord "YOUR_BOT_TOKEN"
-./scripts/connect-channel.sh slack "xapp-TOKEN" "xoxb-TOKEN"
-```
-
-> **Note:** Direct polling only works while the instance is running. When the instance stops (idle timeout), the bot goes silent until manually woken. Use the Lambda router for persistent delivery.
 
 The agent patches its gateway config, restarts the channel, and confirms when live. Once connected, message the bot directly on that platform — no further API calls needed.
 
@@ -162,8 +147,8 @@ Once approved, the channel is fully active and subsequent messages flow directly
 - **IAM**: Least-privilege execution role (Bedrock + ECR + Logs + S3 + Secrets Manager)
 - **Encryption**: S3 bucket encrypted at rest (SSE-S3 or KMS), EBS encrypted
 - **Gateway auth**: Loopback-only binding (`--bind loopback`) — gateway only listens on 127.0.0.1, unreachable from outside the container
-- **Channel tokens**: Stored on encrypted EBS; for production use [Secrets Manager](./docs/CONFIGURATION.md#iam-roles) (`openclaw/*` prefix)
-- **Instance management**: AWS-managed EC2 — you don't SSH in; use AgentCore APIs
+- **Channel tokens**: With the Lambda router (recommended), tokens are Lambda environment variables set once at deploy time — never written to the instance's workspace. For the legacy direct-polling mode only, tokens land on encrypted EBS; if using that mode, prefer [Secrets Manager](./docs/CONFIGURATION.md#channel-tokens-with-secrets-manager) (`openclaw/*` prefix) over passing tokens at invoke time.
+- **Instance management**: AWS-managed EC2 — no direct access needed for normal operation (use AgentCore APIs); optionally use SSM Session Manager for shell access if you need to inspect the instance directly (see [Architecture](./docs/ARCHITECTURE.md))
 
 This sample follows the [AWS Shared Responsibility Model](https://aws.amazon.com/compliance/shared-responsibility-model/). Review and harden configurations before deploying to production.
 
