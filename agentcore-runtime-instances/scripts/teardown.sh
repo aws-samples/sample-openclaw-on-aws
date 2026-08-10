@@ -4,8 +4,9 @@ set -euo pipefail
 # Teardown — remove all AgentCore and CDK resources
 
 REGION="${AWS_REGION:-us-east-1}"
-RUNTIME_NAME="${RUNTIME_NAME:-openclaw-agent}"
-CAPACITY_PROVIDER_NAME="${CAPACITY_PROVIDER_NAME:-openclaw-capacity-provider}"
+# Note: Name regex is ^[a-zA-Z][a-zA-Z0-9_]{0,47}$ — no hyphens! Must match deploy.sh.
+RUNTIME_NAME="${RUNTIME_NAME:-openclaw_agent}"
+CAPACITY_PROVIDER_NAME="${CAPACITY_PROVIDER_NAME:-openclaw_capacity_provider}"
 
 echo "============================================"
 echo " Tearing down OpenClaw AgentCore Instances"

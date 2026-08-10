@@ -174,6 +174,10 @@ except client.exceptions.ResourceNotFoundException:
         capacityProviderConfiguration={
             "capacityProviderArn": cp_arn,
         },
+        lifecycleConfiguration={
+            "idleRuntimeSessionTimeout": 14400,  # 4h rolling window (see docs/RUNTIME_BEHAVIOR.md)
+            "maxLifetime": 1209600,  # 14 days
+        },
         environmentVariables={
             "S3_BACKUP_BUCKET": bucket_name,
             "S3_BACKUP_PREFIX": "workspace",

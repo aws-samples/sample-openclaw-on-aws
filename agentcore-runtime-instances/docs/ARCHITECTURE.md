@@ -3,7 +3,7 @@
 # Architecture
 
 ```
-User (WhatsApp / Telegram / Discord / Slack)
+User (Telegram / Discord / Slack)
        │
        │  (native channels — outbound connections from OpenClaw)
        ▼
@@ -22,7 +22,7 @@ User (WhatsApp / Telegram / Discord / Slack)
             │                              │          │
      InvokeAgentRuntime             Amazon Bedrock   Telegram/
      (first invocation               (Claude 4.6)   Discord/
-      provisions instance)                          WhatsApp
+      provisions instance)                          Slack
             │
             ▼
 ┌───────────────────────────────────────────────────────────────┐
@@ -85,7 +85,6 @@ container:
 
 - **Telegram**: Long-polling (outbound connection, no webhook URL needed)
 - **Discord**: WebSocket bot connection (outbound)
-- **WhatsApp**: WhatsApp Web pairing (outbound)
 - **Slack**: Socket Mode (outbound WebSocket, no public URL needed)
 
 This works only while the gateway process is running. Once the instance
@@ -105,7 +104,7 @@ instance effectively stays on.
 | Idle cost | Full EC2 cost 24/7 | $0 (serverless) | **$0 (auto-stop on idle)** |
 | GPU support | Manual setup | ❌ | ✅ |
 | Patching/lifecycle | You manage | AWS managed | **AWS managed** |
-| Auto-stop on idle | Manual implementation | N/A (ephemeral) | **Built-in (idleInstanceTimeout)** |
+| Auto-stop on idle | Manual implementation | N/A (ephemeral) | **Built-in (idleRuntimeSessionTimeout)** |
 | Auto-resume | N/A | N/A | **Automatic on next `invoke-agent-runtime` call** (see [Channel Router](CHANNEL_ROUTER.md) for how inbound channel messages trigger this) |
 | Multi-agent | Manual | ❌ | ✅ (shared session) |
 | Cost model | EC2 on-demand | Pay-per-use | EC2 in your account (Savings Plans apply) |
@@ -116,7 +115,7 @@ Running OpenClaw on a self-managed EC2 instance works, but AgentCore Instances a
 
 | Capability | Plain EC2 | AgentCore Instances |
 |-----------|-----------|---------------------|
-| **Auto-stop on idle** | DIY (cron + CloudWatch) | Built-in `idleInstanceTimeout` |
+| **Auto-stop on idle** | DIY (cron + CloudWatch) | Built-in `idleRuntimeSessionTimeout` |
 | **Auto-resume on message** | Not possible without proxy | Automatic via `InvokeAgentRuntime` (requires the [Channel Router](CHANNEL_ROUTER.md) to bridge inbound channel messages to that API) |
 | **Managed patching** | SSM Patch Manager (you configure) | AWS-managed, zero-downtime |
 | **Built-in tracing** | Install X-Ray SDK manually | Native X-Ray integration |

@@ -2,6 +2,8 @@
 
 # ASH Security Scan Report
 
+> **Note:** This is a point-in-time snapshot from 2026-08-08. It predates the Lambda Router (`lambda_router_stack.py`), which is not covered by this scan. Regenerate with the `ash-security-scan` skill before relying on it for the current codebase.
+
 - **Report generated**: 2026-08-08T12:38:08+00:00
 - **Time since scan**: 0 minutes
 
