@@ -1,6 +1,6 @@
 # OpenClaw on AgentCore Runtime Instances
 
-[![Open in Kiro](https://img.shields.io/badge/Open_in-Kiro-blue?style=flat-square&logo=amazon-aws)](https://kiro.dev/open?repo=aws-samples/sample-openclaw-on-aws-with-bedrock&path=agentcore-instances)
+[![Open in Kiro](https://img.shields.io/badge/Open_in-Kiro-blue?style=flat-square&logo=amazon-aws)](https://kiro.dev/open?repo=aws-samples/sample-openclaw-on-aws&path=agentcore-runtime-instances)
 ![License: MIT-0](https://img.shields.io/badge/License-MIT--0-yellow.svg?style=flat-square)
 ![AWS CDK](https://img.shields.io/badge/AWS_CDK-v2-orange?style=flat-square&logo=amazon-aws)
 ![AgentCore Runtime](https://img.shields.io/badge/AgentCore-Runtime_Instances-blue?style=flat-square&logo=amazon-aws)
@@ -16,12 +16,12 @@ Deploy [OpenClaw](https://openclaw.ai) as a persistent AI assistant on [Amazon B
 ## Quick Start
 
 ```bash
-git clone https://github.com/aws-samples/sample-openclaw-on-aws-with-bedrock.git
-cd sample-openclaw-on-aws-with-bedrock/agentcore-instances
+git clone https://github.com/aws-samples/sample-openclaw-on-aws.git
+cd sample-openclaw-on-aws/agentcore-runtime-instances
 ./scripts/deploy.sh
 ```
 
-That's it. The deploy script handles CDK bootstrap, stack creation, container build, capacity provider, and runtime setup.
+That's it (after CDK bootstrap and Python deps — see Detailed setup below). The deploy script creates the stacks, container image, capacity provider, and runtime.
 
 Once deployed, invoke your agent:
 
@@ -41,7 +41,7 @@ aws bedrock-agentcore invoke-agent-runtime \
   /dev/stdout
 ```
 
-The first invocation provisions the EC2 instance (~2-3 min). Subsequent invocations on the same session resume instantly.
+The first invocation provisions the EC2 instance (~90s–3 min depending on image cache state). Subsequent invocations on the same session resume instantly.
 
 <details>
 <summary><strong>Detailed setup (manual steps)</strong></summary>
@@ -63,6 +63,7 @@ npx aws-cdk deploy --all --require-approval never
 # 5. Create AgentCore resources (capacity provider + runtime)
 # The deploy.sh script handles this via boto3, or run manually:
 python3 scripts/deploy.sh
+# deploy.sh is a bash script; invoke directly as ./scripts/deploy.sh
 ```
 
 </details>
@@ -114,7 +115,7 @@ Once approved, the channel is fully active and subsequent messages flow directly
 - Python 3.11+
 - Docker (for container image build)
 - AWS credentials configured
-- boto3 with bedrock-agentcore-control support
+- boto3 with bedrock-agentcore-control support (>=1.35, needed for `create_capacity_provider`/`create_agent_runtime`; older boto3 lacks the service model)
 
 ## Project Structure
 
@@ -160,6 +161,8 @@ This sample follows the [AWS Shared Responsibility Model](https://aws.amazon.com
 - **[Cost Estimate](./docs/COST.md)** — Monthly cost breakdown and optimization tips
 - **[Cleanup](./docs/CLEANUP.md)** — Stop, delete, or fully remove all resources
 - **[Skills](./docs/SKILLS.md)** — Pre-installed and recommended AWS skills
+- **[Channel Router](./docs/CHANNEL_ROUTER.md)** — Telegram/Discord/Slack via Lambda, idle-wake, cold-start behavior
+- **[Serverless Considerations](./docs/SERVERLESS_CONSIDERATIONS.md)** — Known friction points and workarounds
 - **[Multi-Tenancy](./docs/MULTI_TENANCY_CONSIDERATIONS.md)** — Patterns for 10-1000+ users
 
 ## License
