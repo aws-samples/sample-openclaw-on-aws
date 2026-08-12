@@ -15,13 +15,19 @@ logger = logging.getLogger()
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 WEBHOOK_SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET_TOKEN", "")
-ALLOWED_USER_IDS = os.environ.get("ALLOWED_USER_IDS", "").split(",")
+ALLOWED_USER_IDS = [
+    uid.strip() for uid in os.environ.get("ALLOWED_USER_IDS", "").split(",") if uid.strip()
+]
 
 
 def validate_webhook(event: dict) -> bool:
-    """Validate the Telegram webhook secret token."""
+    """Validate the Telegram webhook secret token.
+
+    Fails CLOSED: an unconfigured channel (no secret set) must never accept
+    traffic, since that would leave an unauthenticated public endpoint live.
+    """
     if not WEBHOOK_SECRET_TOKEN:
-        return True
+        return False
     headers = event.get("headers", {})
     secret = headers.get("x-telegram-bot-api-secret-token", "")
     return secret == WEBHOOK_SECRET_TOKEN

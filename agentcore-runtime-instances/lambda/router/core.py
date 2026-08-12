@@ -4,8 +4,11 @@ Handles:
 - AgentCore invoke-agent-runtime call
 - Cold-start detection and tracking via DynamoDB
 - Retry logic for transient failures during instance warm-up
+- Per-user session-id derivation (multi-tenant isolation)
+- Per-user request cooldown (cost-amplification guard)
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -18,10 +21,16 @@ logger = logging.getLogger()
 
 # Configuration
 AGENTCORE_RUNTIME_ARN = os.environ["AGENTCORE_RUNTIME_ARN"]
+# SESSION_ID is a fallback default ONLY -- used if a channel/adapter somehow
+# fails to supply a user_id. The primary path is derive_session_id() below,
+# which gives every distinct (channel, user_id) its own AgentCore session so
+# users don't share EBS workspace/conversation history (see fix for
+# docs/MULTI_TENANCY_CONSIDERATIONS.md).
 SESSION_ID = os.environ.get("SESSION_ID", "default-session")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 IDLE_TIMEOUT_SECONDS = int(os.environ.get("IDLE_TIMEOUT_SECONDS", "900"))
 COLDSTART_TABLE = os.environ.get("COLDSTART_TABLE", "")
+REQUEST_COOLDOWN_SECONDS = int(os.environ.get("REQUEST_COOLDOWN_SECONDS", "5"))
 
 # Clients (lazy init)
 _agentcore_client = None
@@ -44,6 +53,29 @@ def _get_dynamodb_client():
     if _dynamodb_client is None:
         _dynamodb_client = boto3.client("dynamodb", region_name=AWS_REGION)
     return _dynamodb_client
+
+
+def derive_session_id(channel: str, user_id: str) -> str:
+    """Derive a deterministic, collision-safe per-user AgentCore session id.
+
+    Each distinct (channel, user_id) pair gets its own runtimeSessionId, so
+    each user gets their own dedicated EC2/EBS instance and conversation
+    history (the Silo Model multi-tenancy isolation the docs describe) --
+    instead of everyone sharing the single SESSION_ID default.
+
+    AgentCore requires runtimeSessionId to be at least 33 characters. A raw
+    f"{channel}-{user_id}" is usually far shorter (e.g. "telegram-12345"),
+    so we append a short deterministic hash suffix to pad it out safely
+    without losing human-debuggability of the prefix.
+    """
+    if not user_id:
+        return SESSION_ID
+
+    base = f"{channel}-{user_id}"
+    digest = hashlib.sha256(base.encode("utf-8")).hexdigest()
+    session_id = f"{base}-{digest}"
+    # AgentCore session ids have a maximum length too; truncate generously.
+    return session_id[:128]
 
 
 def is_likely_cold_start(session_id: str = None) -> bool:
@@ -90,6 +122,46 @@ def record_success(session_id: str = None):
         )
     except Exception as exc:
         logger.warning("Failed to record success: %s", exc)
+
+
+def is_rate_limited(channel: str, user_id: str) -> bool:
+    """Cheap per-(channel,user_id) cooldown to blunt cost-amplification abuse.
+
+    Reuses the cold-start DynamoDB table with a distinct key namespace
+    ("ratelimit:<channel>:<user_id>") so a burst of repeated messages from
+    one user doesn't each provision a full invoke+~255s-retry worker cycle.
+    Fails open (returns False / not rate-limited) on any DynamoDB error so a
+    transient DynamoDB issue never blocks legitimate traffic -- this is a
+    cost guard, not the authorization boundary.
+    """
+    if not COLDSTART_TABLE or not user_id:
+        return False
+
+    key = f"ratelimit:{channel}:{user_id}"
+    now = time.time()
+    try:
+        resp = _get_dynamodb_client().get_item(
+            TableName=COLDSTART_TABLE,
+            Key={"session_id": {"S": key}},
+            ProjectionExpression="last_success_epoch",
+        )
+        item = resp.get("Item")
+        if item:
+            last = int(item["last_success_epoch"]["N"])
+            if now - last < REQUEST_COOLDOWN_SECONDS:
+                return True
+
+        _get_dynamodb_client().put_item(
+            TableName=COLDSTART_TABLE,
+            Item={
+                "session_id": {"S": key},
+                "last_success_epoch": {"N": str(int(now))},
+            },
+        )
+        return False
+    except Exception as exc:
+        logger.warning("Rate-limit check failed, allowing request: %s", exc)
+        return False
 
 
 def invoke_agent(message_text: str, session_id: str = None) -> str | None:

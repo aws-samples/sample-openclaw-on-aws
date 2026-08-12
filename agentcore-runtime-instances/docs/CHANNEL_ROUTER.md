@@ -42,6 +42,18 @@ Channel ← reply (sendMessage / edit / postMessage)
 | User sees no feedback during cold start | Cold-start detection + immediate status message |
 | Markdown characters break Telegram replies | Plain text (no parse_mode) |
 
+## Per-User Session Isolation
+
+Each distinct `(channel, user_id)` pair is routed to its own AgentCore
+`runtimeSessionId`, derived deterministically in `core.py`'s
+`derive_session_id()` as a SHA-256-suffixed `"{channel}-{user_id}-{hash}"`
+string (padded to meet AgentCore's 33-character minimum). This means
+different users get their own dedicated EC2/EBS instance and conversation
+history automatically — no DynamoDB user-table lookup needed, and no
+manual per-user provisioning step. The `SESSION_ID` environment variable is
+kept only as a fallback default for the rare case where an adapter can't
+supply a `user_id`.
+
 ## Cold-Start UX
 
 The router tracks last successful invocation in DynamoDB. When `elapsed > idle_timeout`, it knows a cold start is likely:
@@ -191,20 +203,27 @@ timeout):
 ### Telegram
 - **Inbound:** Webhook (setWebhook API)
 - **Outbound:** sendMessage, editMessageText
-- **Auth:** Secret token header validation
-- **Config:** `TELEGRAM_BOT_TOKEN`, `WEBHOOK_SECRET_TOKEN`, `ALLOWED_USER_IDS`
+- **Auth:** Secret token header validation (fails closed if `WEBHOOK_SECRET_TOKEN` is unset)
+- **Config:** `TELEGRAM_BOT_TOKEN`, `WEBHOOK_SECRET_TOKEN`, `ALLOWED_USER_IDS` (required; comma-separated, whitespace-trimmed)
 
 ### Discord
 - **Inbound:** Interactions endpoint (slash commands)
 - **Outbound:** Deferred response + PATCH original
-- **Auth:** Ed25519 signature (TODO: add PyNaCl layer)
-- **Config:** `DISCORD_BOT_TOKEN`, `DISCORD_PUBLIC_KEY`, `DISCORD_APPLICATION_ID`
+- **Auth:** Ed25519 signature verification (PyNaCl) against `DISCORD_PUBLIC_KEY`; fails closed if the key is unset/invalid or the signature doesn't verify
+- **Config:** `DISCORD_BOT_TOKEN`, `DISCORD_PUBLIC_KEY`, `DISCORD_APPLICATION_ID`, `DISCORD_ALLOWED_USER_IDS` (required; comma-separated, whitespace-trimmed)
 
 ### Slack
 - **Inbound:** Events API (app_mention, message)
 - **Outbound:** chat.postMessage, chat.update
-- **Auth:** HMAC-SHA256 request signing
-- **Config:** `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`
+- **Auth:** HMAC-SHA256 request signing (fails closed if `SLACK_SIGNING_SECRET` is unset)
+- **Config:** `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_ALLOWED_USER_IDS` (required; comma-separated, whitespace-trimmed)
+
+Every channel enforces its allowlist as a second layer of defense in
+addition to webhook auth — a user who isn't in the relevant
+`*_ALLOWED_USER_IDS` list is rejected even if the request signature is
+valid, since a valid signature only proves the request came from that
+channel platform, not that the specific sender is authorized to use this
+bot.
 
 ## Deployment
 
@@ -219,16 +238,20 @@ timeout):
 # Multiple channels in one deployment
 ./scripts/deploy-channel-router.sh \
   --runtime-arn <RUNTIME_ARN> \
-  --telegram-token "<BOT_TOKEN>" \
-  --slack-token "<xoxb-...>" --slack-signing-secret "<SECRET>" \
-  --discord-token "<BOT_TOKEN>" --discord-public-key "<KEY>" --discord-app-id "<APP_ID>"
+  --telegram-token "<BOT_TOKEN>" --telegram-allowed-ids "<USER_ID>" \
+  --slack-token "<xoxb-...>" --slack-signing-secret "<SECRET>" --slack-allowed-ids "<USER_ID>" \
+  --discord-token "<BOT_TOKEN>" --discord-public-key "<KEY>" --discord-app-id "<APP_ID>" --discord-allowed-ids "<USER_ID>"
 ```
 
 The script provisions the IAM role, DynamoDB cold-start table, Lambda
-function (with bundled boto3), one API Gateway route per enabled channel,
-and registers the Telegram webhook automatically. Discord and Slack print
-the endpoint URL to paste into their respective developer consoles (see
-"Supported Channels" below for where).
+function (with bundled boto3 + pynacl), one API Gateway route **per enabled
+channel only** (a channel with no credentials configured gets no route at
+all), and registers the Telegram webhook automatically. Discord and Slack
+print the endpoint URL to paste into their respective developer consoles
+(see "Supported Channels" below for where). Each enabled channel requires
+its `--*-allowed-ids` flag — the script errors out if you enable a channel
+without one, since an unconfigured allowlist means no one is authorized,
+not everyone.
 
 Run `./scripts/deploy-channel-router.sh --help` for the full flag list.
 
@@ -276,6 +299,29 @@ Lambda role requires:
 - `bedrock-agentcore:InvokeAgentRuntime` on the runtime ARN
 - `lambda:InvokeFunction` on itself (async worker)
 - `dynamodb:GetItem` + `dynamodb:PutItem` on the cold-start table
+
+## Rate Limiting & Cost Controls
+
+Three independent layers bound worst-case cost from an unauthenticated or
+abusive request volume (each layer is defense in depth — none of them
+replaces channel auth/allowlist enforcement):
+
+1. **Lambda reserved concurrency** — `stacks/lambda_router_stack.py` sets
+   `reserved_concurrent_executions` (default 8; also settable via
+   `deploy-channel-router.sh`'s `RESERVED_CONCURRENCY` env var). This caps
+   how many concurrent webhook+worker invocations can run at once,
+   regardless of request volume — bounding how many simultaneous
+   c7g.large provisioning cycles + ~255s retry windows can be in flight.
+2. **API Gateway throttling** — the `$default` stage is throttled
+   (default burst=10, rate=5 req/s; settable via `THROTTLE_BURST_LIMIT` /
+   `THROTTLE_RATE_LIMIT`), rejecting excess requests before they even reach
+   the Lambda.
+3. **Per-user cooldown** — `core.py`'s `is_rate_limited()` uses the
+   existing cold-start DynamoDB table to drop repeated messages from the
+   same `(channel, user_id)` within `REQUEST_COOLDOWN_SECONDS` (default 5s)
+   before the async self-invoke + worker cycle even starts, so a burst of
+   spam from one authorized user doesn't multiply into N full invoke-with-
+   retry cycles.
 
 ## Troubleshooting
 

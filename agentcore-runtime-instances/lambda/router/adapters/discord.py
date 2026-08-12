@@ -12,30 +12,71 @@ If cold start detected, we follow up with a status message.
 Requires: DISCORD_BOT_TOKEN, DISCORD_PUBLIC_KEY, DISCORD_APPLICATION_ID
 """
 
-import hashlib
 import json
 import logging
 import os
+import time
 from urllib import request as urllib_request
 from urllib.error import URLError
+
+from nacl.exceptions import BadSignatureError
+from nacl.signing import VerifyKey
 
 logger = logging.getLogger()
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 DISCORD_PUBLIC_KEY = os.environ.get("DISCORD_PUBLIC_KEY", "")
 DISCORD_APPLICATION_ID = os.environ.get("DISCORD_APPLICATION_ID", "")
+DISCORD_ALLOWED_USER_IDS = [
+    uid.strip() for uid in os.environ.get("DISCORD_ALLOWED_USER_IDS", "").split(",") if uid.strip()
+]
+
+_verify_key = None
+if DISCORD_PUBLIC_KEY:
+    try:
+        _verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
+    except (ValueError, TypeError) as exc:
+        logger.error("Invalid DISCORD_PUBLIC_KEY, Discord will reject all requests: %s", exc)
+        _verify_key = None
 
 
 def validate_webhook(event: dict) -> bool:
-    """Validate Discord interaction signature.
+    """Validate Discord interaction signature (Ed25519).
 
-    Discord requires Ed25519 signature verification. For simplicity in Lambda
-    (no nacl dependency), we skip verification here and rely on API Gateway
-    to not expose the endpoint publicly without the webhook secret.
-    In production, add PyNaCl layer for proper verification.
+    Per Discord's spec: the signed message is `timestamp + raw_body`,
+    verified against DISCORD_PUBLIC_KEY using the X-Signature-Ed25519 and
+    X-Signature-Timestamp headers. Fails CLOSED: if DISCORD_PUBLIC_KEY is
+    unset/invalid, or headers are missing/malformed, or the signature does
+    not verify, this returns False -- an unconfigured or unverifiable
+    Discord channel must never accept traffic.
     """
-    # TODO: Add Ed25519 verification with PyNaCl Lambda layer
-    return True
+    if _verify_key is None:
+        return False
+
+    headers = event.get("headers", {})
+    # API Gateway HTTP API lower-cases header names.
+    signature = headers.get("x-signature-ed25519", "")
+    timestamp = headers.get("x-signature-timestamp", "")
+    body = event.get("body", "") or ""
+
+    if not signature or not timestamp:
+        return False
+
+    try:
+        signature_bytes = bytes.fromhex(signature)
+    except ValueError:
+        return False
+
+    message = (timestamp + body).encode("utf-8")
+
+    try:
+        _verify_key.verify(message, signature_bytes)
+        return True
+    except BadSignatureError:
+        return False
+    except Exception as exc:
+        logger.warning("Discord signature verification error: %s", exc)
+        return False
 
 
 def parse_inbound(event: dict) -> dict | None:
@@ -75,10 +116,16 @@ def parse_inbound(event: dict) -> dict | None:
         return None
 
     user = body.get("member", {}).get("user", {}) or body.get("user", {})
+    user_id = user.get("id", "")
+
+    # Access control
+    if user_id not in DISCORD_ALLOWED_USER_IDS:
+        logger.warning("Unauthorized Discord user: %s", user_id)
+        return None
 
     return {
         "chat_id": body.get("channel_id"),
-        "user_id": user.get("id", ""),
+        "user_id": user_id,
         "message_text": message_text,
         "message_id": body.get("id"),
         "interaction_token": body.get("token"),

@@ -116,6 +116,7 @@ Once approved, the channel is fully active and subsequent messages flow directly
 - Docker (for container image build)
 - AWS credentials configured
 - boto3 with bedrock-agentcore-control support (>=1.35, needed for `create_capacity_provider`/`create_agent_runtime`; older boto3 lacks the service model)
+- `jq` (used by `deploy-channel-router.sh` to build Lambda environment JSON safely — avoids interpolating credential values into a script body)
 
 ## Project Structure
 
@@ -148,7 +149,11 @@ Once approved, the channel is fully active and subsequent messages flow directly
 - **IAM**: Least-privilege execution role (Bedrock + ECR + Logs + S3 + Secrets Manager)
 - **Encryption**: S3 bucket encrypted at rest (SSE-S3 or KMS), EBS encrypted
 - **Gateway auth**: Loopback-only binding (`--bind loopback`) — gateway only listens on 127.0.0.1, unreachable from outside the container
+- **Exec posture**: `tools.exec.security` is `"allowlist"` (not `"full"`) with `ask: "off"`. The bot stays fully autonomous — no approval prompt blocks an async Telegram/Discord/Slack reply — but it can only run an explicit allowlist of coding tools (`git`, `npm`, `node`, `python3`/`pip`, `pytest`, and common file tools like `cat`/`ls`/`grep`/`find`/`mkdir`/`cp`/`mv`) instead of arbitrary shell. `strictInlineEval` is also enabled so injected text can't smuggle a shell command through an already-allowlisted interpreter (`python3 -c "..."`, etc.). This limits what a successful prompt injection (see [Multi-Tenancy — known limitations](./docs/MULTI_TENANCY_CONSIDERATIONS.md)) can actually do, without giving up the unattended-bot UX.
 - **Channel tokens**: With the Lambda router (recommended), tokens are Lambda environment variables set once at deploy time — never written to the instance's workspace. For the legacy direct-polling mode only, tokens land on encrypted EBS; if using that mode, prefer [Secrets Manager](./docs/CONFIGURATION.md#channel-tokens-with-secrets-manager) (`openclaw/*` prefix) over passing tokens at invoke time.
+- **Channel webhook auth**: Every channel adapter fails **closed** — an unconfigured or unverifiable channel (missing secret, missing/invalid Discord public key, bad signature) rejects the request rather than defaulting to allow. Discord webhooks use real Ed25519 signature verification (`PyNaCl`) against `DISCORD_PUBLIC_KEY`; Telegram/Slack verify their respective secret/signing-secret headers. Each channel also enforces a required user-id allowlist (`ALLOWED_USER_IDS` / `DISCORD_ALLOWED_USER_IDS` / `SLACK_ALLOWED_USER_IDS`) — see [Channel Router](./docs/CHANNEL_ROUTER.md).
+- **Cost controls**: Lambda reserved concurrency + API Gateway throttling bound worst-case spend from an unauthenticated request burst, and a per-user cooldown drops rapid repeat messages before they trigger another full invoke-with-retry cycle. See [Channel Router — Rate Limiting](./docs/CHANNEL_ROUTER.md).
+- **Per-user isolation**: The Lambda router derives a distinct AgentCore `runtimeSessionId` per (channel, user) pair, so different users get their own dedicated EC2/EBS instance and conversation history instead of sharing one session.
 - **Instance management**: AWS-managed EC2 — no direct access needed for normal operation (use AgentCore APIs); optionally use SSM Session Manager for shell access if you need to inspect the instance directly (see [Architecture](./docs/ARCHITECTURE.md))
 
 This sample follows the [AWS Shared Responsibility Model](https://aws.amazon.com/compliance/shared-responsibility-model/). Review and harden configurations before deploying to production.
