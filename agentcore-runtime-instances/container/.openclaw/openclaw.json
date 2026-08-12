@@ -27,6 +27,6 @@
   },
   "tools": {
     "profile": "full",
-    "exec": { "host": "gateway", "security": "full", "ask": "off" }
+    "exec": { "host": "gateway", "security": "allowlist", "ask": "off", "strictInlineEval": true }
   }
 }

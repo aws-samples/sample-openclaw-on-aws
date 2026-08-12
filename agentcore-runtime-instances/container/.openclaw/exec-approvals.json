@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "socket": {
+    "path": "~/.openclaw/exec-approvals.sock"
+  },
+  "defaults": {
+    "security": "allowlist",
+    "ask": "off",
+    "askFallback": "deny",
+    "autoAllowSkills": false
+  },
+  "agents": {
+    "main": {
+      "security": "allowlist",
+      "ask": "off",
+      "askFallback": "deny",
+      "autoAllowSkills": false,
+      "allowlist": [
+        { "id": "668f2f81-bdb2-44f4-843d-edb5f81617b5", "pattern": "git" },
+        { "id": "adc11e3f-27ee-4db1-9a0a-307632f99358", "pattern": "npm" },
+        { "id": "f84aed10-a2d5-4abe-8bcf-132401c50c7a", "pattern": "node" },
+        { "id": "1687185b-cb2f-4e77-929b-6cb979a2d88a", "pattern": "python3" },
+        { "id": "251ed38d-6081-481e-89f9-233e55ee5898", "pattern": "pip" },
+        { "id": "68f25a58-df6e-4665-a2e8-9cea7014c838", "pattern": "pip3" },
+        { "id": "5c860972-c032-4265-b5f8-e7c90226dae0", "pattern": "pytest" },
+        { "id": "c36a6622-7533-4b62-a90b-26f0f27e6b0a", "pattern": "cat" },
+        { "id": "f590b2ba-3e35-44df-ac31-83ab6569a8cd", "pattern": "ls" },
+        { "id": "b9619fb2-b5e0-45a1-b1b4-e5370d292c13", "pattern": "grep" },
+        { "id": "3c4c6a27-13fa-48d2-a87e-3b0ec14d278f", "pattern": "find" },
+        { "id": "d5fdbb96-9565-45cc-ae6f-f66e33def85f", "pattern": "mkdir" },
+        { "id": "4a788aff-24f5-4c69-b1fb-83445e0878b6", "pattern": "cp" },
+        { "id": "18258e40-4a1f-4b26-a4bb-d0d56a735778", "pattern": "mv" }
+      ]
+    }
+  }
+}

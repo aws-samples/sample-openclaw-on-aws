@@ -23,7 +23,7 @@ import boto3
 # Add current dir to path for local imports
 sys.path.insert(0, os.path.dirname(__file__))
 
-from core import is_likely_cold_start, invoke_with_retry
+from core import derive_session_id, is_likely_cold_start, is_rate_limited, invoke_with_retry
 from adapters import telegram as tg_adapter
 from adapters import discord as dc_adapter
 from adapters import slack as sl_adapter
@@ -97,8 +97,16 @@ def handle_webhook(event: dict) -> dict:
     logger.info("Inbound %s from user %s: %s",
                 channel, parsed.get("user_id"), parsed.get("message_text", "")[:100])
 
+    # Cheap per-user cooldown -- blunts cost-amplification abuse before we
+    # spend an async self-invoke + full invoke-with-retry cycle on a burst
+    # of repeated messages from the same user.
+    if is_rate_limited(channel, parsed.get("user_id", "")):
+        logger.info("Rate-limited %s user %s, dropping request.", channel, parsed.get("user_id"))
+        return {"statusCode": 200, "body": "OK"}
+
     # Send typing / cold-start notice
-    cold = is_likely_cold_start()
+    session_id = derive_session_id(channel, parsed.get("user_id", ""))
+    cold = is_likely_cold_start(session_id)
     notice_id = None
 
     if channel == "telegram":
@@ -124,6 +132,7 @@ def handle_webhook(event: dict) -> dict:
         "parsed": parsed,
         "notice_id": notice_id,
         "is_cold": cold,
+        "session_id": session_id,
     }
 
     lambda_client.invoke(
@@ -144,13 +153,14 @@ def handle_worker(event: dict) -> dict:
 
     adapter = ADAPTERS[channel]
     message_text = parsed["message_text"]
+    session_id = event.get("session_id") or derive_session_id(channel, parsed.get("user_id", ""))
 
     # Keep sending typing indicators during processing (for non-cold Telegram)
     if channel == "telegram" and not is_cold:
         adapter.send_typing(parsed["chat_id"])
 
-    # Invoke AgentCore
-    response_text = invoke_with_retry(message_text)
+    # Invoke AgentCore -- routed to this user's own dedicated session/instance.
+    response_text = invoke_with_retry(message_text, session_id=session_id)
 
     # Send response via channel-specific method
     if channel == "telegram":

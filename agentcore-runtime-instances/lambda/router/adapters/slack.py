@@ -24,12 +24,19 @@ logger = logging.getLogger()
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "")
+SLACK_ALLOWED_USER_IDS = [
+    uid.strip() for uid in os.environ.get("SLACK_ALLOWED_USER_IDS", "").split(",") if uid.strip()
+]
 
 
 def validate_webhook(event: dict) -> bool:
-    """Validate Slack request signature."""
+    """Validate Slack request signature.
+
+    Fails CLOSED: an unconfigured channel (no signing secret set) must never
+    accept traffic.
+    """
     if not SLACK_SIGNING_SECRET:
-        return True
+        return False
 
     headers = event.get("headers", {})
     timestamp = headers.get("x-slack-request-timestamp", "")
@@ -79,9 +86,16 @@ def parse_inbound(event: dict) -> dict | None:
     if slack_event.get("subtype"):
         return None
 
+    slack_user_id = slack_event.get("user", "")
+
+    # Access control
+    if slack_user_id not in SLACK_ALLOWED_USER_IDS:
+        logger.warning("Unauthorized Slack user: %s", slack_user_id)
+        return None
+
     return {
         "chat_id": slack_event.get("channel"),
-        "user_id": slack_event.get("user", ""),
+        "user_id": slack_user_id,
         "message_text": slack_event.get("text", ""),
         "message_id": slack_event.get("ts"),
         "thread_ts": slack_event.get("thread_ts"),

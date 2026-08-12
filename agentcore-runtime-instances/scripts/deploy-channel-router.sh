@@ -20,12 +20,14 @@
 #   --runtime-arn <ARN>            AgentCore runtime ARN (required)
 #   --session-id <ID>              Fixed runtimeSessionId (min 33 chars; default: generated)
 #   --telegram-token <TOKEN>       Enable Telegram
-#   --telegram-allowed-ids <IDS>   Comma-separated Telegram user IDs (optional allowlist)
+#   --telegram-allowed-ids <IDS>   Comma-separated Telegram user IDs (required allowlist when Telegram enabled)
 #   --discord-token <TOKEN>        Enable Discord (also requires --discord-public-key, --discord-app-id)
 #   --discord-public-key <KEY>
 #   --discord-app-id <ID>
+#   --discord-allowed-ids <IDS>    Comma-separated Discord user IDs (required allowlist when Discord enabled)
 #   --slack-token <TOKEN>          Enable Slack (also requires --slack-signing-secret)
 #   --slack-signing-secret <SECRET>
+#   --slack-allowed-ids <IDS>      Comma-separated Slack user IDs (required allowlist when Slack enabled)
 #
 # Example (Telegram only):
 #   ./scripts/deploy-channel-router.sh \
@@ -53,8 +55,13 @@ TELEGRAM_ALLOWED_IDS=""
 DISCORD_BOT_TOKEN=""
 DISCORD_PUBLIC_KEY=""
 DISCORD_APP_ID=""
+DISCORD_ALLOWED_IDS=""
 SLACK_BOT_TOKEN=""
 SLACK_SIGNING_SECRET=""
+SLACK_ALLOWED_IDS=""
+RESERVED_CONCURRENCY="${RESERVED_CONCURRENCY:-8}"
+THROTTLE_BURST_LIMIT="${THROTTLE_BURST_LIMIT:-10}"
+THROTTLE_RATE_LIMIT="${THROTTLE_RATE_LIMIT:-5}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -65,8 +72,10 @@ while [ $# -gt 0 ]; do
         --discord-token) DISCORD_BOT_TOKEN="$2"; shift 2 ;;
         --discord-public-key) DISCORD_PUBLIC_KEY="$2"; shift 2 ;;
         --discord-app-id) DISCORD_APP_ID="$2"; shift 2 ;;
+        --discord-allowed-ids) DISCORD_ALLOWED_IDS="$2"; shift 2 ;;
         --slack-token) SLACK_BOT_TOKEN="$2"; shift 2 ;;
         --slack-signing-secret) SLACK_SIGNING_SECRET="$2"; shift 2 ;;
+        --slack-allowed-ids) SLACK_ALLOWED_IDS="$2"; shift 2 ;;
         -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
@@ -95,6 +104,22 @@ fi
 
 if [ -n "$SLACK_BOT_TOKEN" ] && [ -z "$SLACK_SIGNING_SECRET" ]; then
     echo "Error: Slack requires --slack-token and --slack-signing-secret together."
+    exit 1
+fi
+
+# Each enabled channel needs an explicit allowlist. Fail closed: no allowlist
+# means no one is authorized on that channel, not "everyone is" -- an empty
+# allowlist is a misconfiguration to catch here, not a permissive default.
+if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -z "$TELEGRAM_ALLOWED_IDS" ]; then
+    echo "Error: --telegram-allowed-ids is required when --telegram-token is set."
+    exit 1
+fi
+if [ -n "$DISCORD_BOT_TOKEN" ] && [ -z "$DISCORD_ALLOWED_IDS" ]; then
+    echo "Error: --discord-allowed-ids is required when --discord-token is set."
+    exit 1
+fi
+if [ -n "$SLACK_BOT_TOKEN" ] && [ -z "$SLACK_ALLOWED_IDS" ]; then
+    echo "Error: --slack-allowed-ids is required when --slack-token is set."
     exit 1
 fi
 
@@ -181,31 +206,51 @@ cp "$LAMBDA_DIR/index.py" "$LAMBDA_DIR/core.py" "$BUILD_DIR/"
 cp -r "$LAMBDA_DIR/adapters" "$BUILD_DIR/"
 
 # Lambda's built-in Python 3.12 runtime ships boto3 without the
-# bedrock-agentcore service model; bundle a current boto3/botocore.
-pip install boto3 -t "$BUILD_DIR" --upgrade --quiet --no-cache-dir
+# bedrock-agentcore service model, and doesn't ship pynacl at all (needed
+# for Discord Ed25519 signature verification); bundle both.
+pip install boto3 pynacl -t "$BUILD_DIR" --upgrade --quiet --no-cache-dir
 
 (cd "$BUILD_DIR" && zip -r "$ZIP_FILE" . -x "*.dist-info/*" "*.pyc" "__pycache__/*" "*.egg-info/*" >/dev/null)
 echo "    Package size: $(du -h "$ZIP_FILE" | cut -f1)"
 
 # --- Step 4: Environment variables ---
-ENV_JSON=$(python3 -c "
-import json
-env = {
-    'AGENTCORE_RUNTIME_ARN': '$RUNTIME_ARN',
-    'SESSION_ID': '$SESSION_ID',
-    'COLDSTART_TABLE': '$COLDSTART_TABLE',
-    'IDLE_TIMEOUT_SECONDS': '900',
-    'TELEGRAM_BOT_TOKEN': '''$TELEGRAM_BOT_TOKEN''',
-    'WEBHOOK_SECRET_TOKEN': '$WEBHOOK_SECRET',
-    'ALLOWED_USER_IDS': '''$TELEGRAM_ALLOWED_IDS''',
-    'DISCORD_BOT_TOKEN': '''$DISCORD_BOT_TOKEN''',
-    'DISCORD_PUBLIC_KEY': '''$DISCORD_PUBLIC_KEY''',
-    'DISCORD_APPLICATION_ID': '''$DISCORD_APP_ID''',
-    'SLACK_BOT_TOKEN': '''$SLACK_BOT_TOKEN''',
-    'SLACK_SIGNING_SECRET': '''$SLACK_SIGNING_SECRET''',
-}
-print(json.dumps({'Variables': env}))
-")
+# Built via `jq -n --arg` rather than interpolating shell variables into a
+# Python source string. `--arg` treats every value as an opaque string and
+# escapes it correctly for JSON output regardless of its contents (quotes,
+# backslashes, etc.) -- there is no code-generation step for an attacker-
+# controlled credential value to break out of.
+ENV_JSON=$(jq -n \
+    --arg runtime_arn "$RUNTIME_ARN" \
+    --arg session_id "$SESSION_ID" \
+    --arg coldstart_table "$COLDSTART_TABLE" \
+    --arg telegram_token "$TELEGRAM_BOT_TOKEN" \
+    --arg webhook_secret "$WEBHOOK_SECRET" \
+    --arg telegram_allowed_ids "$TELEGRAM_ALLOWED_IDS" \
+    --arg discord_token "$DISCORD_BOT_TOKEN" \
+    --arg discord_public_key "$DISCORD_PUBLIC_KEY" \
+    --arg discord_app_id "$DISCORD_APP_ID" \
+    --arg discord_allowed_ids "$DISCORD_ALLOWED_IDS" \
+    --arg slack_token "$SLACK_BOT_TOKEN" \
+    --arg slack_signing_secret "$SLACK_SIGNING_SECRET" \
+    --arg slack_allowed_ids "$SLACK_ALLOWED_IDS" \
+    '{
+        Variables: {
+            AGENTCORE_RUNTIME_ARN: $runtime_arn,
+            SESSION_ID: $session_id,
+            COLDSTART_TABLE: $coldstart_table,
+            IDLE_TIMEOUT_SECONDS: "900",
+            TELEGRAM_BOT_TOKEN: $telegram_token,
+            WEBHOOK_SECRET_TOKEN: $webhook_secret,
+            ALLOWED_USER_IDS: $telegram_allowed_ids,
+            DISCORD_BOT_TOKEN: $discord_token,
+            DISCORD_PUBLIC_KEY: $discord_public_key,
+            DISCORD_APPLICATION_ID: $discord_app_id,
+            DISCORD_ALLOWED_USER_IDS: $discord_allowed_ids,
+            SLACK_BOT_TOKEN: $slack_token,
+            SLACK_SIGNING_SECRET: $slack_signing_secret,
+            SLACK_ALLOWED_USER_IDS: $slack_allowed_ids
+        }
+    }')
 
 # --- Step 5: Create or update Lambda ---
 echo "==> Deploying Lambda function..."
@@ -249,6 +294,16 @@ aws iam put-role-policy \
             \"Resource\": \"arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FUNCTION_NAME}\"
         }]
     }"
+
+# Reserved concurrency bounds worst-case cost from an unauthenticated/
+# abusive request volume -- each concurrent execution can hold a c7g.large
+# provisioning cycle open for up to the ~255s retry window, so an unbounded
+# concurrency ceiling multiplies directly into EC2/Bedrock/Lambda spend.
+echo "==> Setting reserved concurrency ($RESERVED_CONCURRENCY)..."
+aws lambda put-function-concurrency \
+    --function-name "$FUNCTION_NAME" \
+    --reserved-concurrent-executions "$RESERVED_CONCURRENCY" \
+    --region "$REGION" >/dev/null
 
 FUNCTION_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FUNCTION_NAME}"
 
@@ -309,6 +364,16 @@ for CHANNEL in "${CHANNELS[@]}"; do
         echo "    Route added: $ROUTE_KEY"
     fi
 done
+
+# Throttle the default stage to bound worst-case cost from an
+# unauthenticated/abusive request volume (defense in depth alongside
+# channel auth + reserved concurrency above).
+echo "==> Setting API Gateway throttling (burst=$THROTTLE_BURST_LIMIT, rate=$THROTTLE_RATE_LIMIT/s)..."
+aws apigatewayv2 update-stage \
+    --api-id "$API_ID" \
+    --stage-name '$default' \
+    --default-route-settings "ThrottlingBurstLimit=${THROTTLE_BURST_LIMIT},ThrottlingRateLimit=${THROTTLE_RATE_LIMIT}" \
+    --region "$REGION" >/dev/null
 
 # --- Step 7: Register webhooks / interaction endpoints per channel ---
 echo "==> Registering channel webhooks..."
