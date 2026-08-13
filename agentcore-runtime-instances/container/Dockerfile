@@ -17,10 +17,13 @@
 FROM public.ecr.aws/docker/library/python:3.11-slim
 
 # System dependencies
+# gosu is used by start.sh to drop root privileges before running the
+# gateway/agent process (see privilege-drop note near ENTRYPOINT below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     unzip \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Install AWS CLI v2 (needed for S3 backup sync)
@@ -48,6 +51,13 @@ COPY patch_channels.py .
 COPY start.sh .
 RUN chmod +x start.sh
 
+# Non-root runtime user. The container still starts as root (needed for the
+# EBS-backed OPENCLAW_HOME mount prep AgentCore performs before start.sh's
+# main work begins), but start.sh drops privileges to this user via `gosu`
+# before launching main.py/the OpenClaw gateway -- see ENTRYPOINT note below.
+RUN groupadd --gid 1000 agent && \
+    useradd --uid 1000 --gid agent --home-dir /home/agent --create-home --shell /usr/sbin/nologin agent
+
 # Create workspace directory structure (used as defaults on first boot)
 RUN mkdir -p /home/agent/.openclaw/workspace
 
@@ -70,7 +80,14 @@ ENV NODE_ENV=production
 # the container to poll channels directly instead (legacy mode, incompatible
 # with the Channel Router — see docs/CONFIGURATION.md).
 
-# Run as root — AgentCore manages the security boundary at the instance/session level.
-# The EBS volume mounted by AgentCore is owned by root.
-# checkov:skip=CKV_DOCKER_3: AgentCore requires root for EBS volume access
+# Container starts as root: AgentCore mounts the EBS root volume before
+# start.sh's application logic runs, and that mount point / its top-level
+# contents can be root-owned at that point. start.sh's own first steps (see
+# the "privilege drop" section in start.sh) chown OPENCLAW_HOME to the
+# non-root `agent` user, then re-exec as `agent` via `gosu` before launching
+# main.py / the OpenClaw gateway. The gateway/agent process itself never
+# needs to run as root.
+# checkov:skip=CKV_DOCKER_3: entrypoint starts as root only to prepare the
+# EBS-backed OPENCLAW_HOME mount; start.sh drops to a non-root user (gosu)
+# before executing any application code.
 ENTRYPOINT ["./start.sh"]

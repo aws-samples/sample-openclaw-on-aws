@@ -3,6 +3,14 @@ set -e
 
 # OpenClaw on AgentCore Runtime Instances — Entrypoint
 #
+# Privilege model: this script runs as root only long enough to prepare the
+# EBS-backed OPENCLAW_HOME mount (chown to the non-root `agent` user), then
+# drops privileges via `gosu` before starting main.py / the OpenClaw
+# gateway. Everything the agent executes (including allowlist-approved exec
+# tool commands) runs as `agent`, not root -- so an allowlist escape or
+# exec-approval bypass no longer grants root on the host. See the Dockerfile
+# for the `agent` user definition and the checkov:skip rationale.
+#
 # Persistence: S3 backup/restore (container filesystem is ephemeral)
 # - Small files (credentials, workspace, config): S3 sync
 # - Large dirs (npm, agents): S3 tarball (compressed)
@@ -30,6 +38,7 @@ set -e
 
 OPENCLAW_HOME="${OPENCLAW_HOME:-/home/agent/.openclaw}"
 S3_BACKUP_BUCKET="${S3_BACKUP_BUCKET:-}"
+RUN_USER="${OPENCLAW_RUN_USER:-agent}"
 
 # Auto-discover S3 backup bucket from SSM Parameter Store if not set
 if [ -z "$S3_BACKUP_BUCKET" ]; then
@@ -42,7 +51,18 @@ fi
 export S3_BACKUP_BUCKET
 
 echo "[start.sh] OpenClaw home: $OPENCLAW_HOME"
+
+# --- Privilege drop ---
+# This entrypoint starts as root (see Dockerfile: the container previously
+# ran the gateway/agent process as root for its entire lifetime, which turns
+# any allowlist-escape or exec-approval bypass into an immediate root
+# compromise). Root is only genuinely needed for one thing here: preparing
+# the EBS-backed OPENCLAW_HOME mount, which AgentCore can (re)mount as
+# root-owned before start.sh runs. Once that's chowned, everything else --
+# main.py, the OpenClaw gateway, all exec-approval-gated commands the agent
+# runs -- executes as the unprivileged `agent` user via `gosu`.
 mkdir -p "$OPENCLAW_HOME/workspace"
+chown -R agent:agent "$OPENCLAW_HOME"
 
 # --- Fallback-only workspace init ---
 # If nothing has ever restored a workspace on this EBS volume yet, seed it
@@ -67,8 +87,8 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-# --- Start AgentCore wrapper ---
-echo "[start.sh] Starting AgentCore wrapper..."
-python main.py &
+# --- Start AgentCore wrapper (as non-root `agent` user) ---
+echo "[start.sh] Starting AgentCore wrapper as user '$RUN_USER'..."
+gosu "$RUN_USER" env HOME=/home/agent python3 main.py &
 WRAPPER_PID=$!
 wait $WRAPPER_PID || true

@@ -16,12 +16,36 @@
       "askFallback": "deny",
       "autoAllowSkills": false,
       "allowlist": [
-        { "id": "668f2f81-bdb2-44f4-843d-edb5f81617b5", "pattern": "git" },
-        { "id": "adc11e3f-27ee-4db1-9a0a-307632f99358", "pattern": "npm" },
-        { "id": "f84aed10-a2d5-4abe-8bcf-132401c50c7a", "pattern": "node" },
-        { "id": "1687185b-cb2f-4e77-929b-6cb979a2d88a", "pattern": "python3" },
-        { "id": "251ed38d-6081-481e-89f9-233e55ee5898", "pattern": "pip" },
-        { "id": "68f25a58-df6e-4665-a2e8-9cea7014c838", "pattern": "pip3" },
+        {
+          "id": "668f2f81-bdb2-44f4-843d-edb5f81617b5",
+          "pattern": "git",
+          "argPattern": "^(status|log|diff|show|branch|tag|remote|fetch|pull|push|add|commit|checkout|switch|restore|merge|rebase|stash|describe|rev-parse|blame|ls-files|clone|init|reset|cherry-pick)(?=$|\\s)(?!.*(?:^|\\s)(-c|-C|--upload-pack|--receive-pack|--exec|--git-dir|--work-tree)(?:=|\\s|$)).*$"
+        },
+        {
+          "id": "adc11e3f-27ee-4db1-9a0a-307632f99358",
+          "pattern": "npm",
+          "argPattern": "^(install|ci|test)(\\s.*)?$"
+        },
+        {
+          "id": "f84aed10-a2d5-4abe-8bcf-132401c50c7a",
+          "pattern": "node",
+          "argPattern": "^(?!.*(?:^|\\s)(-e|--eval|-p|--print)(?:=|\\s|$)).*$"
+        },
+        {
+          "id": "1687185b-cb2f-4e77-929b-6cb979a2d88a",
+          "pattern": "python3",
+          "argPattern": "^(?!.*(?:^|\\s)(-c|--command)(?:=|\\s|$)).*$"
+        },
+        {
+          "id": "251ed38d-6081-481e-89f9-233e55ee5898",
+          "pattern": "pip",
+          "argPattern": "^(install|uninstall|list|show|freeze|download)(\\s.*)?$"
+        },
+        {
+          "id": "68f25a58-df6e-4665-a2e8-9cea7014c838",
+          "pattern": "pip3",
+          "argPattern": "^(install|uninstall|list|show|freeze|download)(\\s.*)?$"
+        },
         { "id": "5c860972-c032-4265-b5f8-e7c90226dae0", "pattern": "pytest" },
         { "id": "c36a6622-7533-4b62-a90b-26f0f27e6b0a", "pattern": "cat" },
         { "id": "f590b2ba-3e35-44df-ac31-83ab6569a8cd", "pattern": "ls" },
