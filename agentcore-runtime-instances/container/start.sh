@@ -3,18 +3,42 @@ set -e
 
 # OpenClaw on AgentCore Runtime Instances — Entrypoint
 #
+# Privilege model: this script runs as root only long enough to prepare the
+# EBS-backed OPENCLAW_HOME mount (chown to the non-root `agent` user), then
+# drops privileges via `gosu` before starting main.py / the OpenClaw
+# gateway. Everything the agent executes (including allowlist-approved exec
+# tool commands) runs as `agent`, not root -- so an allowlist escape or
+# exec-approval bypass no longer grants root on the host. See the Dockerfile
+# for the `agent` user definition and the checkov:skip rationale.
+#
 # Persistence: S3 backup/restore (container filesystem is ephemeral)
 # - Small files (credentials, workspace, config): S3 sync
 # - Large dirs (npm, agents): S3 tarball (compressed)
 # - Excluded: logs/, telegram/ (ephemeral)
 #
-# Boot: restore from S3 → start gateway → background sync
-# Shutdown: SIGTERM → final sync → exit
+# Tenant isolation: the actual S3 restore/backup logic lives in main.py, not
+# here. The AgentCore runtime session id is only available inside an HTTP
+# request handler (via the X-Amzn-Bedrock-AgentCore-Runtime-Session-Id
+# header), so it cannot be known at container boot time, before start.sh has
+# run. Doing session-unaware restore/backup here against one static prefix
+# (the old "workspace" prefix) would let a second tenant that cold-starts on
+# this same container silently inherit the first tenant's files. So:
+#   - start.sh's job is just: discover the S3 bucket, export it, launch
+#     main.py, and handle SIGTERM by forwarding it to main.py so *it* can run
+#     a final per-session sync with the session-scoped prefix it already
+#     knows about.
+#   - main.py performs the actual per-session S3 restore (on the first
+#     request of a cold container) and periodic/final per-session backup,
+#     using f"sessions/{sanitized_session_id}" as the S3 prefix instead of a
+#     shared static prefix.
+#
+# Boot: discover bucket -> start main.py (which restores/starts gateway on
+#       first request) -> main.py runs periodic per-session sync.
+# Shutdown: SIGTERM -> forwarded to main.py -> final per-session sync -> exit.
 
 OPENCLAW_HOME="${OPENCLAW_HOME:-/home/agent/.openclaw}"
 S3_BACKUP_BUCKET="${S3_BACKUP_BUCKET:-}"
-S3_BACKUP_PREFIX="${S3_BACKUP_PREFIX:-workspace}"
-SYNC_INTERVAL="${SYNC_INTERVAL:-300}"
+RUN_USER="${OPENCLAW_RUN_USER:-agent}"
 
 # Auto-discover S3 backup bucket from SSM Parameter Store if not set
 if [ -z "$S3_BACKUP_BUCKET" ]; then
@@ -24,102 +48,47 @@ if [ -z "$S3_BACKUP_BUCKET" ]; then
         echo "[start.sh] S3 backup bucket discovered: $S3_BACKUP_BUCKET"
     fi
 fi
+export S3_BACKUP_BUCKET
 
 echo "[start.sh] OpenClaw home: $OPENCLAW_HOME"
 
-# --- S3 helper functions ---
-s3_restore() {
-    if [ -z "$S3_BACKUP_BUCKET" ]; then return 1; fi
-    local PREFIX="s3://$S3_BACKUP_BUCKET/$S3_BACKUP_PREFIX"
-
-    echo "[start.sh] Restoring from S3..."
-    mkdir -p "$OPENCLAW_HOME/credentials" "$OPENCLAW_HOME/workspace"
-
-    # Restore small files (fast, individual sync)
-    aws s3 cp "$PREFIX/openclaw.json" "$OPENCLAW_HOME/openclaw.json" --quiet 2>/dev/null || true
-    aws s3 sync "$PREFIX/credentials/" "$OPENCLAW_HOME/credentials/" --quiet 2>/dev/null || true
-    aws s3 sync "$PREFIX/workspace/" "$OPENCLAW_HOME/workspace/" --quiet 2>/dev/null || true
-    aws s3 sync "$PREFIX/identity/" "$OPENCLAW_HOME/identity/" --quiet 2>/dev/null || true
-
-    # Restore tarballs (npm + agents)
-    if aws s3 cp "$PREFIX/npm.tar.gz" /tmp/npm.tar.gz --quiet 2>/dev/null; then
-        tar xzf /tmp/npm.tar.gz -C "$OPENCLAW_HOME/" 2>/dev/null || true
-        rm -f /tmp/npm.tar.gz
-        echo "[start.sh] Restored npm/ from tarball."
-    fi
-    if aws s3 cp "$PREFIX/agents.tar.gz" /tmp/agents.tar.gz --quiet 2>/dev/null; then
-        tar xzf /tmp/agents.tar.gz -C "$OPENCLAW_HOME/" 2>/dev/null || true
-        rm -f /tmp/agents.tar.gz
-        echo "[start.sh] Restored agents/ from tarball."
-    fi
-
-    [ -f "$OPENCLAW_HOME/openclaw.json" ]
-}
-
-s3_backup() {
-    if [ -z "$S3_BACKUP_BUCKET" ]; then return; fi
-    local PREFIX="s3://$S3_BACKUP_BUCKET/$S3_BACKUP_PREFIX"
-
-    # Sync small files
-    aws s3 cp "$OPENCLAW_HOME/openclaw.json" "$PREFIX/openclaw.json" --quiet 2>/dev/null || true
-    aws s3 sync "$OPENCLAW_HOME/credentials/" "$PREFIX/credentials/" --quiet 2>/dev/null || true
-    aws s3 sync "$OPENCLAW_HOME/workspace/" "$PREFIX/workspace/" --quiet 2>/dev/null || true
-    [ -d "$OPENCLAW_HOME/identity" ] && aws s3 sync "$OPENCLAW_HOME/identity/" "$PREFIX/identity/" --quiet 2>/dev/null || true
-
-    # Tarball large dirs (only if they exist and have content)
-    if [ -d "$OPENCLAW_HOME/npm" ] && [ "$(ls -A "$OPENCLAW_HOME/npm" 2>/dev/null)" ]; then
-        tar czf /tmp/npm.tar.gz -C "$OPENCLAW_HOME" npm 2>/dev/null && \
-            aws s3 cp /tmp/npm.tar.gz "$PREFIX/npm.tar.gz" --quiet 2>/dev/null || true
-        rm -f /tmp/npm.tar.gz
-    fi
-    if [ -d "$OPENCLAW_HOME/agents" ] && [ "$(ls -A "$OPENCLAW_HOME/agents" 2>/dev/null)" ]; then
-        tar czf /tmp/agents.tar.gz -C "$OPENCLAW_HOME" agents 2>/dev/null && \
-            aws s3 cp /tmp/agents.tar.gz "$PREFIX/agents.tar.gz" --quiet 2>/dev/null || true
-        rm -f /tmp/agents.tar.gz
-    fi
-}
-
-# --- Workspace initialization ---
-if [ -f "$OPENCLAW_HOME/openclaw.json" ]; then
-    echo "[start.sh] Workspace exists — zero cold start."
-else
-    echo "[start.sh] Workspace not found."
-    if s3_restore; then
-        echo "[start.sh] Restored from S3 backup."
-    else
-        echo "[start.sh] First boot — initializing from defaults..."
-        mkdir -p "$OPENCLAW_HOME"
-        cp -r /app/.openclaw-defaults/* "$OPENCLAW_HOME/"
-        echo "[start.sh] Workspace initialized."
-    fi
-fi
-
+# --- Privilege drop ---
+# This entrypoint starts as root (see Dockerfile: the container previously
+# ran the gateway/agent process as root for its entire lifetime, which turns
+# any allowlist-escape or exec-approval bypass into an immediate root
+# compromise). Root is only genuinely needed for one thing here: preparing
+# the EBS-backed OPENCLAW_HOME mount, which AgentCore can (re)mount as
+# root-owned before start.sh runs. Once that's chowned, everything else --
+# main.py, the OpenClaw gateway, all exec-approval-gated commands the agent
+# runs -- executes as the unprivileged `agent` user via `gosu`.
 mkdir -p "$OPENCLAW_HOME/workspace"
+chown -R agent:agent "$OPENCLAW_HOME"
 
-# --- Background S3 sync ---
-if [ -n "$S3_BACKUP_BUCKET" ]; then
-    (
-        while true; do
-            sleep "$SYNC_INTERVAL"
-            s3_backup
-        done
-    ) &
-    S3_SYNC_PID=$!
-    echo "[start.sh] Background S3 sync started (every ${SYNC_INTERVAL}s)"
+# --- Fallback-only workspace init ---
+# If nothing has ever restored a workspace on this EBS volume yet, seed it
+# with defaults so `openclaw.json` exists even before the first request
+# comes in. main.py still does the real (session-scoped) S3 restore-or-init
+# at request time; this is just so the process tree has something sane if
+# main.py's own default-init path is ever bypassed.
+if [ ! -f "$OPENCLAW_HOME/openclaw.json" ] && [ -d /app/.openclaw-defaults ]; then
+    echo "[start.sh] No workspace on EBS yet — main.py will restore or initialize it per-session on first request."
 fi
 
 # --- SIGTERM handler ---
+# main.py installs its own SIGTERM/SIGINT handlers to run a final,
+# session-scoped S3 backup using the prefix it derived at request time.
+# start.sh just needs to forward the signal and wait.
 cleanup() {
-    echo "[start.sh] SIGTERM received. Final sync..."
-    s3_backup
-    echo "[start.sh] Sync complete. Exiting."
-    [ -n "$S3_SYNC_PID" ] && kill "$S3_SYNC_PID" 2>/dev/null || true
+    echo "[start.sh] Signal received. Forwarding to main.py for final per-session sync..."
+    [ -n "$WRAPPER_PID" ] && kill -TERM "$WRAPPER_PID" 2>/dev/null || true
+    wait "$WRAPPER_PID" 2>/dev/null || true
+    echo "[start.sh] main.py exited. Exiting."
     exit 0
 }
 trap cleanup SIGTERM SIGINT
 
-# --- Start AgentCore wrapper ---
-echo "[start.sh] Starting AgentCore wrapper..."
-python main.py &
+# --- Start AgentCore wrapper (as non-root `agent` user) ---
+echo "[start.sh] Starting AgentCore wrapper as user '$RUN_USER'..."
+gosu "$RUN_USER" env HOME=/home/agent python3 main.py &
 WRAPPER_PID=$!
 wait $WRAPPER_PID || true

@@ -7,11 +7,14 @@ Considerations for deploying OpenClaw on AgentCore Runtime Instances to multiple
 > architecture. Per-user AgentCore session routing (EC2/EBS isolation,
 > conversation history) is implemented today via the
 > [Channel Router](CHANNEL_ROUTER.md)'s deterministic per-user
-> `runtimeSessionId` derivation. **Per-tenant S3 backup isolation is the one
-> piece not yet implemented** — see the callout in "Isolation Model: Silo"
-> below — pending either AgentCore platform support for exposing
-> session identity inside the container, or a per-tenant-runtime deployment
-> variant. Tracked as the next milestone for full multi-tenant support.
+> `runtimeSessionId` derivation. **Per-tenant S3 backup isolation** is now
+> implemented at request time: `container/main.py`'s AgentCore entrypoint
+> reads the session id from `BedrockAgentCoreContext.get_session_id()`
+> (only available inside an HTTP request handler, not at container boot),
+> strictly sanitizes it, and uses `sessions/<sanitized-session-id>/` as the
+> S3 backup prefix instead of the old shared `"workspace"` prefix — see the
+> callout in "Isolation Model: Silo" below for the current per-tenant IAM
+> scoping caveat.
 
 ## Isolation Model: Silo
 
@@ -22,22 +25,28 @@ This sample implements a **Silo Model** — each user gets fully isolated, dedic
 | EC2 instance | Per-user | AgentCore (auto-provision on first invoke) |
 | EBS volume | Per-user | AgentCore (persists across stop/resume) |
 | Workspace state | Per-user | OpenClaw (memory, history, config) |
-| S3 backup | **Shared prefix (not yet per-user — see note below)** | Container sync logic |
+| S3 backup | Per-session prefix (`sessions/<sanitized-session-id>/`) | Container sync logic (`container/main.py`), request-time |
 | Capacity provider | Shared (infra template) | You (created once) |
 | Agent runtime | Shared (container image) | You (created once) |
 | Container image | Shared (ECR) | CDK |
 
-> **S3 backup isolation gap:** `S3_BACKUP_PREFIX` is currently a single
-> constant (`"workspace"`) set once at the shared AgentCore runtime level
-> (`scripts/deploy.sh`'s `create_agent_runtime` call). AgentCore Runtime
-> Instances doesn't expose the invoking `runtimeSessionId` to the running
-> container as an environment variable, so the container has no way to
-> derive a per-tenant prefix on its own today. **Don't deploy multi-tenant
-> assuming S3 backups are already isolated per user** — until this lands,
-> treat S3 backup as shared infrastructure state, not tenant-private data.
-> The EC2 instance and EBS volume *are* already fully isolated per user via
-> AgentCore's own session-to-instance mapping — this gap is specifically
-> about the S3 background-backup path, not primary runtime isolation.
+> **S3 backup isolation model:** the S3 backup prefix is now derived per
+> AgentCore session, not a single shared constant. `container/main.py`'s
+> `@app.entrypoint` handler reads the session id from
+> `BedrockAgentCoreContext.get_session_id()` on the first request a (cold)
+> container serves — that context is only populated inside an HTTP request
+> handler (via the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header), not
+> at container boot, which is why the restore/backup logic lives in main.py
+> rather than start.sh. The session id is attacker-influenced input, so it's
+> validated against a strict allowlist (`^[A-Za-z0-9_-]{1,128}$`) before use;
+> anything that fails validation falls back to a fixed safe prefix rather
+> than being stripped and used. IAM is scoped to `<bucket-arn>/sessions/*`
+> (see `stacks/runtime_stack.py`) for defense in depth. One caveat: all
+> sessions on this runtime share one execution role, so this is not a true
+> per-tenant IAM boundary — that would require a per-session role, which
+> AgentCore Instances compute doesn't support today. The EC2 instance and EBS
+> volume remain fully isolated per user via AgentCore's own session-to-
+> instance mapping, independent of this S3 prefixing.
 
 AgentCore enforces the isolation boundary — each `runtimeSessionId` maps to a separate EC2 instance with its own EBS volume. No tenant can access another tenant's compute or storage.
 

@@ -129,20 +129,44 @@ class RuntimeStack(Stack):
         )
 
         # S3 backup bucket access (for background workspace sync)
+        # Scoped to the sessions/* prefix: container/main.py stores each
+        # AgentCore session's backup under sessions/<sanitized-session-id>/
+        # rather than one flat shared prefix, so a per-session S3 key
+        # collision (and the cross-tenant data leak that implies) requires
+        # both the sanitized-session-id allowlist in main.py to be bypassed
+        # AND this IAM scoping to be bypassed. A single execution role is
+        # shared by every session on this runtime, so this is
+        # defense-in-depth, not a per-tenant IAM boundary -- true per-session
+        # isolation would need a per-session role, which AgentCore Instances
+        # compute does not support today.
         if s3_backup_bucket_arn and s3_backup_bucket_arn != "PLACEHOLDER_ARN":
             self.execution_role.add_to_policy(
                 iam.PolicyStatement(
-                    sid="S3BackupSync",
+                    sid="S3BackupSyncObjects",
                     actions=[
                         "s3:GetObject",
                         "s3:PutObject",
                         "s3:DeleteObject",
+                    ],
+                    resources=[
+                        f"{s3_backup_bucket_arn}/sessions/*",
+                    ],
+                )
+            )
+            self.execution_role.add_to_policy(
+                iam.PolicyStatement(
+                    sid="S3BackupSyncList",
+                    actions=[
                         "s3:ListBucket",
                     ],
                     resources=[
                         s3_backup_bucket_arn,
-                        f"{s3_backup_bucket_arn}/*",
                     ],
+                    conditions={
+                        "StringLike": {
+                            "s3:prefix": ["sessions/*"],
+                        },
+                    },
                 )
             )
 

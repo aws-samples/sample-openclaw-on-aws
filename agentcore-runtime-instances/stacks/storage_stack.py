@@ -6,6 +6,17 @@ Persistence model for Instances compute:
 - S3 sync runs every 5 min from the container (non-blocking)
 - Restore from S3 only when workspace is empty (session expired after 14 days — rare)
 
+Tenant isolation: objects are stored per-AgentCore-session under
+`sessions/<sanitized-session-id>/...` rather than a single flat `workspace/`
+prefix shared by every tenant. A flat shared prefix meant any cold container
+that happened to serve a different tenant would restore from (and later
+overwrite) the same S3 objects as the previous tenant — a cross-tenant data
+leak. The session id used to build the prefix is strictly validated in
+container/main.py before use (see `_sanitize_session_id`); this stack scopes
+IAM S3 access to the `sessions/*` prefix for defense in depth (see
+runtime_stack.py's `S3BackupSync` policy) even though a single shared
+execution role cannot enforce per-exact-session IAM conditions.
+
 NOTE: S3 Files / EFS / sessionStorage are NOT supported with
 capacityProviderConfiguration (Instances compute type). This stack provides
 only the S3 bucket for backup purposes.
