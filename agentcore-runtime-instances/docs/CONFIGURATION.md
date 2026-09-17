@@ -43,6 +43,16 @@ Default is `c7g.large` (2 vCPU, 4GB RAM, Graviton ARM64). Change in `stacks/capa
 
 **S3 bucket** (versioned, lifecycle rules) provides background backup. The container syncs workspace→S3 every 5 minutes. S3 restores are only used when the EBS workspace is empty (session expired after 14 days).
 
+## Networking
+
+Defined in `stacks/networking_stack.py`. The VPC has one NAT Gateway and `PRIVATE_WITH_EGRESS` subnets (plus the public subnet the NAT Gateway needs), not fully isolated subnets.
+
+This is required specifically because of how Instances compute works: AgentCore's networking layer manages container internet access for other AgentCore Runtime compute types (e.g. microVMs), but Instances compute launches real EC2 into the subnets your capacity provider hands it (`vpcConfiguration` in `stacks/capacity_provider_stack.py`). Those EC2 instances get exactly the network path their subnet provides — nothing more. With no NAT/IGW route, they cannot reach ECR (pull the container image), Bedrock (inference), SSM, or ClawHub, and the first invocation fails outright. This was hit independently by two people deploying this sample in September 2026 (see PR #7 and its review).
+
+**Cost:** a NAT Gateway is a fixed hourly charge plus per-GB data processing — roughly $0.045/hr + $0.045/GB, which is about $32–35/month just for it sitting idle, on top of the per-GB cost of actual traffic. This does not scale to zero like the EC2 instance does. See [Cost Estimate](./COST.md).
+
+**Optional follow-up — VPC interface endpoints:** adding interface endpoints for `com.amazonaws.<region>.ecr.api`, `ecr.dkr`, `bedrock-runtime`, `sts`, and `logs` would route that AWS-service traffic over PrivateLink instead of the NAT Gateway, cutting NAT data-processing costs (interface endpoints have their own per-AZ hourly + per-GB cost, so this trades one line item for another — it's a savings only past a certain traffic volume, not free). It does **not** let you remove the NAT Gateway: Telegram, Discord, and Slack's bot APIs, plus ClawHub, are third-party SaaS with no AWS PrivateLink endpoint, so egress to the public internet is still required regardless of how much AWS-service traffic you move off it.
+
 ## Supported Regions
 
 AgentCore Runtime Instances is available in the following AWS regions:
