@@ -79,5 +79,6 @@ fi
 | EBS volume (30GB gp3) | ~$0.08/day | Deleted when session expires (14 days) |
 | S3 bucket | ~$0.023/GB/month | Negligible for small workspaces |
 | ECR images | ~$0.10/GB/month | Removed on `cdk destroy` |
+| NAT Gateway | ~$0.045/hr + ~$0.045/GB | Runs continuously — does **not** stop with the session; only removed by `cdk destroy --all` |
 
-**Cost tip:** The agent instance auto-stops on idle — no manual intervention needed. When stopped, you only pay for EBS (~$2.40/mo) and S3 (pennies). No NAT Gateway costs.
+**Cost tip:** The agent instance auto-stops on idle — no manual intervention needed. When stopped, you only pay for EBS (~$2.40/mo), S3 (pennies), and the NAT Gateway (~$32–35/mo, since it has no idle state). Run `cdk destroy --all` if you're stopping for an extended period and want to drop the NAT Gateway cost too — see [Configuration — Networking](./CONFIGURATION.md#networking) for why the sample needs one at all.

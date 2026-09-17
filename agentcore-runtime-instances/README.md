@@ -145,7 +145,7 @@ Once approved, the channel is fully active and subsequent messages flow directly
 
 ## Security
 
-- **Network**: VPC-only networking, no public IP on instances
+- **Network**: VPC-only networking, no public IP on instances; outbound internet egress (ECR, Bedrock, SSM, ClawHub, and channel bot APIs) goes through a NAT Gateway rather than a route AgentCore provides for you — see [Configuration — Networking](./docs/CONFIGURATION.md#networking) for why Instances compute needs this and [Cost Estimate](./docs/COST.md) for what it adds to the bill
 - **IAM**: Least-privilege execution role (Bedrock + ECR + Logs + S3 + Secrets Manager)
 - **Encryption**: S3 bucket encrypted at rest (SSE-S3 or KMS), EBS encrypted
 - **Gateway auth**: Loopback-only binding (`--bind loopback`) — gateway only listens on 127.0.0.1, unreachable from outside the container
