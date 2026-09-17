@@ -298,10 +298,61 @@ def _load_channel_secrets():
         print("[main.py] WARNING: Could not fetch secret: " + result.stderr[:200])
 
 
+def _gateway_home() -> str:
+    """OpenClaw expects OPENCLAW_HOME to be the directory *containing*
+    `.openclaw`, while this wrapper's OPENCLAW_HOME points at the
+    `.openclaw` directory itself."""
+    if os.path.basename(OPENCLAW_HOME.rstrip("/")) == ".openclaw":
+        return os.path.dirname(OPENCLAW_HOME)
+    return OPENCLAW_HOME
+
+
+def _migrate_legacy_exec_approvals():
+    """Migrate a legacy (version 1) exec-approvals.json before the gateway starts.
+
+    OpenClaw 2026.9 moved exec approvals from `~/.openclaw/exec-approvals.json`
+    into its shared SQLite state. While the legacy file is present, every
+    `/v1/responses` call fails with ExecApprovalsMigrationRequiredError and the
+    gateway returns HTTP 500 -- the agent looks healthy but answers nothing.
+
+    `openclaw doctor --repair` performs the migration, but it must run *before*
+    the gateway starts: doctor takes the gateway-lifecycle lock, and once the
+    gateway owns that lock doctor aborts with
+    StateDatabaseCoordinatorContentionError.
+    """
+    approvals_path = os.path.join(OPENCLAW_HOME, "exec-approvals.json")
+    if not os.path.exists(approvals_path):
+        return
+    try:
+        with open(approvals_path) as fh:
+            version = json.load(fh).get("version")
+    except (OSError, ValueError) as exc:
+        print(f"[main.py] Could not read {approvals_path}: {exc}; leaving it alone.")
+        return
+    if not isinstance(version, int) or version >= 2:
+        return
+
+    gw_home = _gateway_home()
+    print(f"[main.py] Legacy exec approvals (version {version}) found; running "
+          "`openclaw doctor --repair` before starting the gateway...")
+    env = {**os.environ, "HOME": gw_home, "OPENCLAW_HOME": gw_home}
+    try:
+        result = subprocess.run(["openclaw", "doctor", "--repair", "--non-interactive"],
+                                cwd=gw_home, env=env, capture_output=True,
+                                text=True, timeout=300)
+    except Exception as exc:
+        print(f"[main.py] WARNING: `openclaw doctor --repair` failed to run: {exc}")
+        return
+    if os.path.exists(approvals_path):
+        print("[main.py] WARNING: legacy exec approvals still present after doctor. "
+              f"stdout tail: {(result.stdout or '')[-500:]}")
+    else:
+        print("[main.py] Exec approvals migrated into OpenClaw's SQLite state.")
+
+
 def _start_gateway():
     global _gateway_process
-    gw_home = os.path.dirname(OPENCLAW_HOME) if os.path.basename(
-        OPENCLAW_HOME.rstrip("/")) == ".openclaw" else OPENCLAW_HOME
+    gw_home = _gateway_home()
     gw_log = open("/tmp/openclaw-gateway.log", "w")
     print(f"[main.py] Starting OpenClaw gateway on :{GATEWAY_PORT}...")
     print(f"[main.py] Gateway OPENCLAW_HOME={gw_home}")
@@ -347,6 +398,7 @@ def _ensure_session_workspace(raw_session_id: Optional[str]):
         else:
             print("[main.py] Webhook-only mode -- no channel polling configured.")
 
+        _migrate_legacy_exec_approvals()
         _start_gateway()
         _start_background_sync()
         _workspace_ready = True

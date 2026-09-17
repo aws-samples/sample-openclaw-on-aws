@@ -58,8 +58,15 @@ RUN chmod +x start.sh
 RUN groupadd --gid 1000 agent && \
     useradd --uid 1000 --gid agent --home-dir /home/agent --create-home --shell /usr/sbin/nologin agent
 
-# Create workspace directory structure (used as defaults on first boot)
-RUN mkdir -p /home/agent/.openclaw/workspace
+# Create the workspace tree and hand the whole home directory to `agent`.
+# This must be done at build time, not in the entrypoint: AgentCore Runtime
+# Instances starts the container on an id-mapped overlay mount, where the
+# container's uid 0 has no DAC override over files owned by another uid. A
+# root-time `mkdir`/`chown` of /home/agent therefore fails with EPERM and
+# kills the entrypoint. Mode 755 on /home/agent keeps it traversable.
+RUN mkdir -p /home/agent/.openclaw/workspace && \
+    chown -R agent:agent /home/agent && \
+    chmod 755 /home/agent
 
 # Default OpenClaw configuration (used if workspace is empty on first boot)
 COPY .openclaw/ /app/.openclaw-defaults/
@@ -80,14 +87,16 @@ ENV NODE_ENV=production
 # the container to poll channels directly instead (legacy mode, incompatible
 # with the Channel Router — see docs/CONFIGURATION.md).
 
-# Container starts as root: AgentCore mounts the EBS root volume before
-# start.sh's application logic runs, and that mount point / its top-level
-# contents can be root-owned at that point. start.sh's own first steps (see
-# the "privilege drop" section in start.sh) chown OPENCLAW_HOME to the
-# non-root `agent` user, then re-exec as `agent` via `gosu` before launching
-# main.py / the OpenClaw gateway. The gateway/agent process itself never
-# needs to run as root.
-# checkov:skip=CKV_DOCKER_3: entrypoint starts as root only to prepare the
-# EBS-backed OPENCLAW_HOME mount; start.sh drops to a non-root user (gosu)
-# before executing any application code.
-ENTRYPOINT ["./start.sh"]
+# Run as the unprivileged `agent` user for the container's entire lifetime.
+# Nothing here needs root: OPENCLAW_HOME is baked in owned by `agent` above,
+# and the AgentCore Instances host mounts the session's persistent storage
+# with ownership the container user can already write. Starting as root and
+# dropping later via `gosu` does not work on this compute type anyway --
+# the id-mapped overlay mount denies the container's uid 0 any override over
+# `agent`-owned paths, so the root-time prep step fails with EPERM.
+# Every exec-tool command the agent runs therefore executes as `agent`.
+USER agent
+# Absolute path: the AgentCore Runtime Instances host wraps the entrypoint in
+# `/bin/sh -c "exec '<entrypoint>'"` without honoring the image WORKDIR, so a
+# relative "./start.sh" exits immediately with "not found".
+ENTRYPOINT ["/app/start.sh"]
