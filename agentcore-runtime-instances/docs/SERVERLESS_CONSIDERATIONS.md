@@ -158,6 +158,52 @@ See [Channel Router docs](CHANNEL_ROUTER.md) for full architecture and evidence.
 
 ---
 
+## 10. Id-mapped mounts: the container must not start as root
+
+**Symptom:** `InvokeAgentRuntime` returns `RuntimeClientError: The agent process
+failed to start`, and the runtime log shows only
+`Container exited before becoming ready (status: Exited); check the agent
+entrypoint and image`. The same image runs fine under `docker run` or
+`nerdctl run` on the very same instance.
+
+**Cause:** AgentCore Runtime Instances starts the workload on an id-mapped
+overlay mount. The process is uid 0 inside its user namespace, but it holds no
+DAC override over files owned by another uid on that mount. A root-time
+`mkdir`/`chown` of an `agent`-owned `OPENCLAW_HOME` therefore fails with
+`EPERM`, and because the entrypoint runs under `set -e` the container dies in
+well under a second — before the host's log drainer can attach, which is why no
+application output reaches CloudWatch.
+
+**Fix:** create and own `OPENCLAW_HOME` at build time and declare `USER agent`
+in the Dockerfile. Do not start as root and drop privileges with `gosu` on this
+compute type. `start.sh` keeps a root branch only for local `docker run --user 0`
+use, and its `ERR` trap prints the failing command so this class of failure is
+visible in CloudWatch rather than silent.
+
+**Also note:** the host wraps the image entrypoint as
+`/bin/sh -c "exec '<entrypoint>' >/tmp/.agent_stdout 2>/tmp/.agent_stderr"`
+without honoring the image `WORKDIR`. A relative `ENTRYPOINT ["./start.sh"]`
+resolves against `/` and fails with `not found`; use an absolute path.
+
+## 11. Legacy exec approvals block every response
+
+**Symptom:** the agent starts, `/ping` is healthy, and every prompt comes back as
+`Error: Gateway returned HTTP 500` with `{"code":"api_error","message":"internal
+error"}`. The gateway log shows
+`ExecApprovalsMigrationRequiredError: Legacy exec approvals exist at
+/home/agent/.openclaw/exec-approvals.json. Run 'openclaw doctor --fix'`.
+
+**Cause:** OpenClaw 2026.9 moved exec approvals out of
+`exec-approvals.json` (schema `version: 1`) into its shared SQLite state, and
+refuses to serve `/v1/responses` while the legacy file is present. This sample
+ships that file, so it affects every fresh workspace.
+
+**Fix:** `main.py` runs `openclaw doctor --repair --non-interactive` before
+starting the gateway when it finds a `version: 1` approvals file. The ordering
+matters: doctor needs the gateway-lifecycle lock, so once the gateway is running
+it aborts with `StateDatabaseCoordinatorContentionError` and the migration never
+happens. Migration imports the approvals into SQLite and removes the JSON file.
+
 ## Database Scaling & Persistence
 
 OpenClaw stores state as files on disk with a [SQLite index](https://docs.openclaw.ai/concepts/memory-builtin) for search. The default architecture:

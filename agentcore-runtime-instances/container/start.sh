@@ -1,6 +1,29 @@
 #!/bin/bash
 set -e
 
+# The AgentCore Instances host may start this script with an arbitrary working
+# directory; main.py is referenced relatively below, so pin cwd to /app.
+cd "$(dirname "$(readlink -f "$0")")"
+
+# Fail loudly. When this script dies under `set -e`, the AgentCore host only
+# reports "Container exited before becoming ready" -- the failing command is
+# invisible. Print it, then pause briefly so the host's log drainer can attach
+# and ship these lines to CloudWatch before the container is torn down.
+_start_failed() {
+    ec=$?
+    echo "[start.sh] FATAL: command '$BASH_COMMAND' failed with exit code $ec"
+    echo "[start.sh] diag: uid=$(id -u) gid=$(id -g) cwd=$(pwd) OPENCLAW_HOME=$OPENCLAW_HOME"
+    echo "[start.sh] diag: stat OPENCLAW_HOME -> $(ls -ld "$OPENCLAW_HOME" 2>&1)"
+    echo "[start.sh] diag: stat parent -> $(ls -ld "$(dirname "$OPENCLAW_HOME")" 2>&1)"
+    echo "[start.sh] diag: mounts:"
+    (grep -E " / | /home| /tmp | /app" /proc/mounts 2>&1 || true)
+    echo "[start.sh] diag: write test root -> $(touch /.__wtest 2>&1 && echo ok || true)"
+    echo "[start.sh] diag: write test home -> $(touch "$OPENCLAW_HOME/.__wtest" 2>&1 && echo ok || true)"
+    sleep 20
+    exit $ec
+}
+trap _start_failed ERR
+
 # OpenClaw on AgentCore Runtime Instances — Entrypoint
 #
 # Privilege model: this script runs as root only long enough to prepare the
@@ -52,17 +75,30 @@ export S3_BACKUP_BUCKET
 
 echo "[start.sh] OpenClaw home: $OPENCLAW_HOME"
 
-# --- Privilege drop ---
-# This entrypoint starts as root (see Dockerfile: the container previously
-# ran the gateway/agent process as root for its entire lifetime, which turns
-# any allowlist-escape or exec-approval bypass into an immediate root
-# compromise). Root is only genuinely needed for one thing here: preparing
-# the EBS-backed OPENCLAW_HOME mount, which AgentCore can (re)mount as
-# root-owned before start.sh runs. Once that's chowned, everything else --
-# main.py, the OpenClaw gateway, all exec-approval-gated commands the agent
-# runs -- executes as the unprivileged `agent` user via `gosu`.
+# --- Workspace ownership ---
+# The container runs as the unprivileged `agent` user from the start (see
+# Dockerfile: USER agent), so there is no privilege drop to perform here and
+# no root-owned mount to fix up. OPENCLAW_HOME is created and chowned to
+# `agent` at build time.
+#
+# Do NOT reintroduce a root-time `mkdir`/`chown` of OPENCLAW_HOME: AgentCore
+# Runtime Instances starts the container on an id-mapped overlay mount where
+# the container's uid 0 holds no DAC override over `agent`-owned paths, so
+# that step fails with EPERM and the entrypoint dies before the agent can
+# answer /ping. The host reports only "Container exited before becoming
+# ready", which is why the ERR trap above prints the failing command.
+#
+# If the process is somehow still root (a modified image, or a local `docker
+# run --user 0`), fix ownership and re-exec as `agent` so the gateway and
+# every exec-tool command it runs stay unprivileged.
+if [ "$(id -u)" = "0" ]; then
+    echo "[start.sh] Running as root; repairing ownership and re-execing as '$RUN_USER'."
+    mkdir -p "$OPENCLAW_HOME/workspace"
+    chown -R "$RUN_USER":"$RUN_USER" "$OPENCLAW_HOME"
+    exec gosu "$RUN_USER" env HOME=/home/agent "$0" "$@"
+fi
+
 mkdir -p "$OPENCLAW_HOME/workspace"
-chown -R agent:agent "$OPENCLAW_HOME"
 
 # --- Fallback-only workspace init ---
 # If nothing has ever restored a workspace on this EBS volume yet, seed it
@@ -87,8 +123,8 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-# --- Start AgentCore wrapper (as non-root `agent` user) ---
-echo "[start.sh] Starting AgentCore wrapper as user '$RUN_USER'..."
-gosu "$RUN_USER" env HOME=/home/agent python3 main.py &
+# --- Start AgentCore wrapper (already running as non-root `agent`) ---
+echo "[start.sh] Starting AgentCore wrapper as user '$(id -un)'..."
+HOME=/home/agent python3 main.py &
 WRAPPER_PID=$!
 wait $WRAPPER_PID || true

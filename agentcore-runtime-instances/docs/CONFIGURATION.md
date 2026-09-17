@@ -4,7 +4,14 @@
 
 ## Model
 
-Set in `container/.openclaw/openclaw.json`:
+Set in `container/.openclaw/openclaw.json`.
+
+> **Keep `baseUrl` in the same Region you deploy to.** The committed default is
+> `us-east-1`. Deploying with `AWS_REGION=us-west-2` while `baseUrl` still points
+> at `us-east-1` sends every inference call cross-Region, which adds latency, bills
+> NAT data processing, and requires model access in that other Region as well.
+> Change `baseUrl` (and rebuild the image) whenever you change `AWS_REGION`.
+
 
 ```json
 {
