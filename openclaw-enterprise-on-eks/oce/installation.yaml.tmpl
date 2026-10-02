@@ -59,6 +59,8 @@ drivers:
         nativeOpenClawSessionCapacity: 8
         nodeSelector:
           oce-role: agents
+        # Used by the companion gateway in dedicated mode. Dedicated mode is
+        # outside this sample; embedded gateways use nodeSelector above.
         gatewayNodeSelector:
           oce-role: control
         transportSecretPrefix: openclaw-agent-transport

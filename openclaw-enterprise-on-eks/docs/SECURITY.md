@@ -34,6 +34,12 @@ Remove the deployment when evaluation finishes.
 - Delete the cluster, retained EBS volumes, ECR images, and local generated
   secrets when testing finishes.
 
+OCE manages tenant and gateway namespaces dynamically. The reviewed release
+therefore grants its worker cluster-wide permission to get, list, create,
+patch, and delete namespaces. This is not `cluster-admin`, but namespace
+deletion has a large blast radius. Run OCE in a dedicated cluster or apply
+additional admission controls after confirming they do not break reconciliation.
+
 For production, replace the in-cluster database and manual credential workflow
 with reviewed high-availability, backup, private-routing, secret-rotation,
 monitoring, and incident-response designs.

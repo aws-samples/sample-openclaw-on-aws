@@ -28,3 +28,14 @@ load_config() {
 require_digest() {
   [[ "$2" =~ @sha256:[a-fA-F0-9]{64}$ ]] || die "$1 must use an immutable sha256 digest"
 }
+
+require_mode_0600() {
+  local label="$1" path="$2" mode
+  [[ -s "$path" ]] || die "$label must point to a nonempty file"
+  if [[ "$(uname)" == Darwin ]]; then
+    mode="$(stat -f '%Lp' "$path")"
+  else
+    mode="$(stat -c '%a' "$path")"
+  fi
+  [[ "$mode" = 600 ]] || die "$label must have file mode 0600, found $mode"
+}

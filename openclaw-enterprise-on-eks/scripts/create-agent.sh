@@ -12,22 +12,144 @@ export OCC_BIN="${OCC_BIN:-$OCE_SOURCE_DIR/bin/occ}"
 bedrock_key_file="${BEDROCK_API_KEY_FILE:-}"
 [[ -x "$OCC_BIN" ]] || die "build the OCE CLI or set OCC_BIN"
 [[ -s "$OCC_SERVICE_KEY_FILE" ]] || die "run retrieve-service-key.sh first"
-[[ -n "$bedrock_key_file" && -s "$bedrock_key_file" ]] ||
+[[ -n "$bedrock_key_file" ]] ||
   die "set BEDROCK_API_KEY_FILE to a mode-0600 key file"
+require_mode_0600 BEDROCK_API_KEY_FILE "$bedrock_key_file"
+require_digest CONTROLLER_IMAGE "$CONTROLLER_IMAGE"
 
+proxy_pod=occ-auto-client
 port_forward_log="$GENERATED_DIR/occ-port-forward.log"
+model_secret_file="$GENERATED_DIR/model-secret.json"
+
 # shellcheck disable=SC2153
+cleanup() {
+  local status=$?
+  rm -f -- "$model_secret_file" || true
+  if [[ -n "${port_forward_pid:-}" ]]; then
+    kill "$port_forward_pid" 2>/dev/null || true
+    wait "$port_forward_pid" 2>/dev/null || true
+  fi
+  kubectl -n "$OCE_NAMESPACE" delete pod "$proxy_pod" \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl -n "$OCE_NAMESPACE" delete networkpolicy occ-auto-client-egress \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  return "$status"
+}
+trap cleanup EXIT
+
+kubectl -n "$OCE_NAMESPACE" delete pod "$proxy_pod" \
+  --ignore-not-found --wait=true >/dev/null
+kubectl -n "$OCE_NAMESPACE" apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: occ-auto-client-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: occ-auto-client
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: openclaw-enterprise
+              app.kubernetes.io/component: api
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $proxy_pod
+  labels:
+    app.kubernetes.io/name: occ-auto-client
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  nodeSelector:
+    oce-role: control
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: proxy
+      image: $CONTROLLER_IMAGE
+      command: [node, -e]
+      args:
+        - |
+          const http = require("node:http");
+          const host = process.env.OPENCLAW_ENTERPRISE_API_SERVICE_HOST;
+          const port = Number(process.env.OPENCLAW_ENTERPRISE_API_SERVICE_PORT || 8080);
+          http.createServer((request, response) => {
+            const headers = {...request.headers, host: host + ":" + port};
+            const upstream = http.request({
+              host, port, path: request.url, method: request.method, headers
+            }, (upstreamResponse) => {
+              response.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.headers);
+              upstreamResponse.pipe(response);
+            });
+            upstream.on("error", () => {
+              response.writeHead(502, {"content-type": "text/plain"});
+              response.end("OCC API unavailable");
+            });
+            request.pipe(upstream);
+          }).listen(8080, "127.0.0.1");
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      resources:
+        requests: {cpu: 25m, memory: 32Mi}
+        limits: {cpu: 100m, memory: 128Mi}
+EOF
+
+kubectl -n "$OCE_NAMESPACE" wait \
+  --for=condition=Ready "pod/$proxy_pod" --timeout=5m
 kubectl -n "$OCE_NAMESPACE" port-forward \
-  service/openclaw-enterprise-api 3000:8080 >"$port_forward_log" 2>&1 &
+  "pod/$proxy_pod" 3000:8080 >"$port_forward_log" 2>&1 &
 port_forward_pid=$!
-trap 'kill "$port_forward_pid" 2>/dev/null || true' EXIT
-sleep 3
+for _ in $(seq 1 30); do
+  if python3 - <<'PY'
+import socket
+
+try:
+    with socket.create_connection(("127.0.0.1", 3000), timeout=1):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
+  then
+    break
+  fi
+  kill -0 "$port_forward_pid" 2>/dev/null ||
+    die "OCC port-forward exited; see $port_forward_log"
+  sleep 1
+done
+python3 - <<'PY' || die "OCC port-forward did not become ready; see the generated log"
+import socket
+
+with socket.create_connection(("127.0.0.1", 3000), timeout=1):
+    pass
+PY
 
 namespace_json="$("$OCC_BIN" namespace list --output json)"
 namespace_id="$(python3 -c '
 import json,sys
 data=json.load(sys.stdin)
-items=data.get("items", data.get("data", data if isinstance(data,list) else []))
+if isinstance(data, list):
+    items=data
+elif isinstance(data, dict):
+    items=data.get("items", data.get("data", []))
+    if isinstance(items, dict):
+        items=items.get("items", [])
+else:
+    items=[]
 matches=[item for item in items if item.get("name")=="default"]
 print(matches[0].get("id") or matches[0].get("data",{}).get("id")) if len(matches)==1 else sys.exit("Expected one default Namespace")
 ' <<<"$namespace_json")"
@@ -85,10 +207,10 @@ done
 
 tr -d '\n' < "$bedrock_key_file" |
   jq -Rs '{name:"bedrock-model-key", value:.}' \
-  > "$GENERATED_DIR/model-secret.json"
+  > "$model_secret_file"
 secret_response="$("$OCC_BIN" secret create \
-  --file "$GENERATED_DIR/model-secret.json" --output json)"
-rm -f "$GENERATED_DIR/model-secret.json"
+  --file "$model_secret_file" --output json)"
+rm -f -- "$model_secret_file"
 secret_id="$(jq -er '.data.id // .id // .ref.id' <<<"$secret_response")"
 
 configuration_response="$("$OCC_BIN" configuration create \

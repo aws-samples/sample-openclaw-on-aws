@@ -66,8 +66,10 @@ identity also needs permission to create EKS, EC2, IAM, ECR, and EBS resources.
 2. Check out the reviewed OCE revision.
 
    ```bash
-   git -C ../openclaw-enterprise checkout \
+   git -C ../../openclaw-enterprise checkout \
      8c02880a0d64ae7576896cec22b136ac8ac5587e
+   pnpm --dir ../../openclaw-enterprise install --frozen-lockfile
+   pnpm --dir ../../openclaw-enterprise cli:build
    ```
 
 3. Create the local configuration.
@@ -164,6 +166,8 @@ tolerations.
 Create a short-term Bedrock API key from a narrowly scoped AWS identity. Store
 it through an OCE Secret and bind only the Agent service identity that needs it.
 Do not put the key in configuration JSON, Helm values, shell history, or Git.
+The effective lifetime is the shorter of the requested key lifetime and the
+source AWS credentials' remaining lifetime.
 
 Retrieve the bootstrap service key, create an embedded Agent, bind its Bedrock
 credential, provision its runtime credentials, and deploy an immutable revision:
@@ -173,15 +177,18 @@ credential, provision its runtime credentials, and deploy an immutable revision:
 BEDROCK_API_KEY_FILE=/secure/bedrock-api-key ./scripts/create-agent.sh
 ```
 
-The script writes only resource IDs to `.generated/agent-state.json`. It does
-not print or copy the Bedrock key.
+The script writes resource IDs and generated namespace names to
+`.generated/agent-state.json`. It creates a mode-0600 temporary JSON document
+for the OCE Secret API and removes it on success or failure. It never prints the
+Bedrock key.
 
-After OCE creates the generated tenant and gateway namespaces, apply the Auto
-Mode DNS rule to both:
+When the Bedrock key expires, update the existing OCE Secret and deploy a new
+Agent revision. Restarting the Pod alone reuses the credential snapshot from
+the existing revision. Follow the upstream
+[credential replacement procedure](https://github.com/openclaw/openclaw-enterprise/blob/8c02880a0d64ae7576896cec22b136ac8ac5587e/docs/guides/deploy/credential-lifecycle.md#replace-runtime-values-and-verify-consumption).
 
-```bash
-./scripts/apply-tenant-dns.sh <tenant-namespace> <gateway-namespace>
-```
+After OCE creates the generated tenant and gateway namespaces,
+`create-agent.sh` applies the Auto Mode DNS rule to both.
 
 ## Validate
 

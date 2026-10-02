@@ -4,7 +4,10 @@
   or large-scale scheduling.
 - PostgreSQL runs as one in-cluster Pod without TLS, backups, or failover.
 - The OCE API and worker each run one replica.
-- Bedrock authentication uses a manually rotated short-term bearer token.
+- Bedrock authentication uses a manually rotated short-term bearer token. Its
+  effective lifetime cannot exceed the source AWS credentials' remaining
+  lifetime, and rotation requires an OCE Secret update plus a new Agent
+  revision.
 - The sample does not validate a Bedrock interface VPC endpoint.
 - The sample does not install private Envoy workspace routing or browser TLS.
 - Dedicated Codex is outside scope because the reviewed runtime can require a
