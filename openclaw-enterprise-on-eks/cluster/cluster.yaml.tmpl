@@ -1,0 +1,23 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: __CLUSTER_NAME__
+  region: __AWS_REGION__
+  version: "__KUBERNETES_VERSION__"
+  tags:
+    Purpose: openclaw-enterprise-auto-mode
+autoModeConfig:
+  enabled: true
+  nodePools:
+    - general-purpose
+    - system
+accessConfig:
+  authenticationMode: API_AND_CONFIG_MAP
+vpc:
+  clusterEndpoints:
+    privateAccess: true
+    publicAccess: true
+  publicAccessCIDRs:
+    - __PUBLIC_ACCESS_CIDR__
+  nat:
+    gateway: Single

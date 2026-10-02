@@ -1,0 +1,57 @@
+{
+  "kind": "agent",
+  "values": {
+    "gateway": {
+      "mode": "local",
+      "bind": "lan",
+      "controlUi": {
+        "enabled": true,
+        "allowedOrigins": [
+          "http://127.0.0.1:18789",
+          "http://localhost:18789"
+        ]
+      },
+      "auth": {
+        "password": {
+          "source": "env",
+          "provider": "default",
+          "id": "OPENCLAW_GATEWAY_PASSWORD"
+        }
+      },
+      "http": {
+        "endpoints": {
+          "chatCompletions": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    "agents": {
+      "defaults": {
+        "model": "openai/__MODEL_ID__",
+        "skipBootstrap": true,
+        "models": {
+          "openai/__MODEL_ID__": {
+            "agentRuntime": {
+              "id": "openclaw"
+            }
+          }
+        }
+      }
+    },
+    "models": {
+      "providers": {
+        "openai": {
+          "baseUrl": "https://bedrock-runtime.__AWS_REGION__.amazonaws.com/openai/v1",
+          "api": "openai-responses",
+          "models": [
+            {
+              "id": "__MODEL_ID__",
+              "name": "__MODEL_ID__"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

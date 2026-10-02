@@ -12,6 +12,7 @@ Deploy [OpenClaw](https://openclaw.ai) on AWS — an AI agent that codes, resear
 | Approach | Description |
 |----------|----------|
 | **[AgentCore](./agentcore-runtime-instances/)** | Personal assistant, persistent state, auto-stop when idle |
+| **[OpenClaw Enterprise on EKS Auto Mode](./openclaw-enterprise-on-eks/)** | Experimental single-Agent evaluation of OCE on EKS Auto Mode with Amazon Bedrock |
 | **[EC2](https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock)** | Full control, always-on |
 | **[EKS](https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/tree/main/eks)** | Kubernetes-native deployment for existing clusters |
 
@@ -67,6 +68,7 @@ For deploying OpenClaw across teams (10-1000+ users), these reference architectu
 
 | Pattern | Approach | Best For |
 |---------|----------|----------|
+| **[OpenClaw Enterprise on EKS Auto Mode](./openclaw-enterprise-on-eks/)** | OCE control plane, encrypted EBS and Auto Mode NodePools | One embedded Agent and node-replacement recovery; no HA, scale, or multi-user validation |
 | **[AgentCore — Multi-Tenant](./agentcore-runtime-instances/docs/MULTI_TENANCY_CONSIDERATIONS.md)** | Per-user sessions, shared capacity provider, per-user S3 prefixes | 10-100 users, variable usage, auto-stop on idle |
 | **[EC2 Enterprise — Tenant Router](https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/tree/main/enterprise)** | H2 proxy, tenant router, per-tenant Firecracker microVMs, Bedrock Guardrails | 100-1000+ users, consistent load, compliance |
 

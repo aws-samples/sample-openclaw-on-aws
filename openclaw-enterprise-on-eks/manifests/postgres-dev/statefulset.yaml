@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: openclaw-system
+  annotations:
+    checkov.io/skip1: CKV_K8S_40=The pinned PostgreSQL image uses its fixed non-root UID 999.
+spec:
+  replicas: 1
+  serviceName: postgres
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        oce-role: control
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: public.ecr.aws/docker/library/postgres@sha256:efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          env:
+            - name: POSTGRES_DB
+              value: openclaw_enterprise
+            - name: POSTGRES_PASSWORD_FILE
+              value: /run/secrets/postgres-password
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, postgres, -d, openclaw_enterprise]
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          livenessProbe:
+            exec:
+              command: [pg_isready, -U, postgres, -d, openclaw_enterprise]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+            - name: password
+              mountPath: /run/secrets
+              readOnly: true
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+        - name: init
+          secret:
+            secretName: postgres-bootstrap # pragma: allowlist secret
+            items:
+              - key: init.sql
+                path: init.sql
+        - name: password
+          secret:
+            secretName: postgres-bootstrap # pragma: allowlist secret
+            items:
+              - key: password # pragma: allowlist secret
+                path: postgres-password
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

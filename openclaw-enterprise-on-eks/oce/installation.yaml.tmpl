@@ -1,0 +1,69 @@
+occ:
+  cluster: __CLUSTER_NAME__
+backend: []
+presets:
+  includeDefaults: true
+drivers:
+  plugin:
+    id: codex-plugin
+    configuration:
+      catalogSource: openai-curated
+  configuration:
+    id: config-kubernetes
+    configuration:
+      authentication:
+        mode: inCluster
+  iam:
+    id: native-iam
+    configuration: {}
+  compute:
+    id: compute-kubernetes
+    configuration:
+      authentication:
+        mode: inCluster
+      images:
+        gateway: __RUNTIME_IMAGE__
+        agent: __RUNTIME_IMAGE__
+        requireImmutableDigest: true
+      resources:
+        gateway:
+          requests: {cpu: 100m, memory: 256Mi}
+          limits: {cpu: "2", memory: 2Gi}
+        agent:
+          requests: {cpu: 100m, memory: 256Mi}
+          limits: {cpu: "2", memory: 2Gi}
+        namespace:
+          quota:
+            pods: "10"
+          containerDefaults:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "2", memory: 2Gi}
+      network:
+        dns:
+          namespace: kube-system
+          podLabels:
+            k8s-app: kube-dns
+        gatewayPort: 8080
+        gatewayTrustedProxyCidrs:
+          - 127.0.0.1/32
+        gatewayClients:
+          - namespace: openclaw-system
+            podLabels:
+              app.kubernetes.io/name: occ-auto-client
+      servicePrincipalCredentials:
+        mode: projectedServiceAccountToken
+        audience: openclaw-enterprise
+        expirationSeconds: 900
+      runtime:
+        gatewayStorageClassName: occ-gateway-rwo
+        nativeOpenClawSessionCapacity: 8
+        nodeSelector:
+          oce-role: agents
+        gatewayNodeSelector:
+          oce-role: control
+        transportSecretPrefix: openclaw-agent-transport
+  secret:
+    id: secret-kubernetes
+    configuration:
+      authentication:
+        mode: inCluster
