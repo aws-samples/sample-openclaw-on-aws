@@ -26,9 +26,6 @@ owns Agent revisions, credentials, Kubernetes namespaces, and runtime
 lifecycle. Auto Mode does not change OCE replica counts or make its API and
 worker highly available.
 
-## Cost drivers
-
-The main cost drivers are the EKS cluster, Auto Mode EC2 instances, NAT gateway
-traffic, EBS volumes, ECR image storage, CloudWatch control-plane logs, and
-Amazon Bedrock model requests. Delete the cluster and retained resources after
-an evaluation.
+See [Tenant isolation](TENANT_ISOLATION.md) for the shared-cluster trust
+boundary. See [Capacity, persistence, and cost controls](CAPACITY_AND_COST.md)
+for node provisioning, replicas, EBS topology, quotas, and budgets.

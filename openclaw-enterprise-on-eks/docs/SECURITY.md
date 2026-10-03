@@ -15,9 +15,16 @@ findings:
 - `CVE-2026-19445` in Python 3.11 in the runtime image
 
 The same unresolved package findings were present in the current official
-Node.js 24 Bookworm bases checked during the spike. Rebuild and rescan before
-each deployment. Do not waive a finding merely because this document lists it.
-Remove the deployment when evaluation finishes.
+Node.js 24 Bookworm bases checked during the spike.
+
+`build-and-publish-images.sh` waits for both ECR scans and fails closed unless
+each scan completes with zero Critical and zero High findings. It writes
+`.generated/images.env` only after both images pass and removes an older copy
+before starting a build. The blocked images remain in ECR because scanning
+occurs after the push.
+
+Rebuild and rescan before each deployment. Do not waive a finding merely
+because this document lists it. Remove the deployment when evaluation finishes.
 
 ## Evaluation controls
 

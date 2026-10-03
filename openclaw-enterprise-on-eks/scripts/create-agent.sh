@@ -10,12 +10,29 @@ export OCC_URL="${OCC_URL:-http://127.0.0.1:3000}"
 export OCC_SERVICE_KEY_FILE="$GENERATED_DIR/initial-admin-service-key.json"
 export OCC_BIN="${OCC_BIN:-$OCE_SOURCE_DIR/bin/occ}"
 bedrock_key_file="${BEDROCK_API_KEY_FILE:-}"
+tenant_name="${TENANT_NAME:-default}"
+agent_name="${AGENT_NAME:-eks-auto-mode-bedrock}"
+verify_denied="${VERIFY_DENIED_BEFORE_BINDING:-0}"
+state_file="${TENANT_STATE_FILE:-$GENERATED_DIR/agent-state.json}"
+allow_existing_tenant="${ALLOW_EXISTING_TENANT:-0}"
+expected_namespace_id="${EXPECTED_NAMESPACE_ID:-}"
 [[ -x "$OCC_BIN" ]] || die "build the OCE CLI or set OCC_BIN"
 [[ -s "$OCC_SERVICE_KEY_FILE" ]] || die "run retrieve-service-key.sh first"
 [[ -n "$bedrock_key_file" ]] ||
   die "set BEDROCK_API_KEY_FILE to a mode-0600 key file"
 require_mode_0600 BEDROCK_API_KEY_FILE "$bedrock_key_file"
 require_digest CONTROLLER_IMAGE "$CONTROLLER_IMAGE"
+[[ "$tenant_name" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
+  die "TENANT_NAME must use lowercase letters, numbers, and hyphens"
+[[ "$agent_name" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
+  die "AGENT_NAME must use lowercase letters, numbers, and hyphens"
+[[ "$verify_denied" = 0 || "$verify_denied" = 1 ]] ||
+  die "VERIFY_DENIED_BEFORE_BINDING must be 0 or 1"
+[[ "$allow_existing_tenant" = 0 || "$allow_existing_tenant" = 1 ]] ||
+  die "ALLOW_EXISTING_TENANT must be 0 or 1"
+[[ "$state_file" = "$GENERATED_DIR/agent-state.json" ||
+  "$state_file" = "$GENERATED_DIR/tenant-$tenant_name.json" ]] ||
+  die "TENANT_STATE_FILE must use the generated default or tenant state path"
 
 proxy_pod=occ-auto-client
 port_forward_log="$GENERATED_DIR/occ-port-forward.log"
@@ -139,8 +156,9 @@ with socket.create_connection(("127.0.0.1", 3000), timeout=1):
 PY
 
 namespace_json="$("$OCC_BIN" namespace list --output json)"
-namespace_id="$(python3 -c '
+namespace_id="$(TENANT_NAME="$tenant_name" python3 -c '
 import json,sys
+import os
 data=json.load(sys.stdin)
 if isinstance(data, list):
     items=data
@@ -150,9 +168,23 @@ elif isinstance(data, dict):
         items=items.get("items", [])
 else:
     items=[]
-matches=[item for item in items if item.get("name")=="default"]
-print(matches[0].get("id") or matches[0].get("data",{}).get("id")) if len(matches)==1 else sys.exit("Expected one default Namespace")
+matches=[item for item in items if item.get("name")==os.environ["TENANT_NAME"]]
+if len(matches)>1:
+    sys.exit("Expected at most one matching Namespace")
+if matches:
+    print(matches[0].get("id") or matches[0].get("data",{}).get("id"))
 ' <<<"$namespace_json")"
+if [[ -z "$namespace_id" ]]; then
+  namespace_response="$("$OCC_BIN" namespace create "$tenant_name" --output json)"
+  namespace_id="$(jq -er '.id // .data.id' <<<"$namespace_response")"
+elif [[ "$tenant_name" != default ]]; then
+  [[ "$allow_existing_tenant" = 1 ]] ||
+    die "Namespace $tenant_name already exists; refusing implicit tenant reuse"
+  [[ -n "$expected_namespace_id" ]] ||
+    die "set EXPECTED_NAMESPACE_ID when ALLOW_EXISTING_TENANT=1"
+  [[ "$namespace_id" = "$expected_namespace_id" ]] ||
+    die "existing Namespace ID does not match EXPECTED_NAMESPACE_ID"
+fi
 export OCC_NAMESPACE="$namespace_id"
 
 tenant_namespace=
@@ -218,11 +250,12 @@ configuration_response="$("$OCC_BIN" configuration create \
 configuration_id="$(jq -er '.id // .data.id' <<<"$configuration_response")"
 
 jq -n \
+  --arg name "$agent_name" \
   --arg configurationId "$configuration_id" \
   --arg namespaceId "$namespace_id" \
   --arg secretId "$secret_id" \
   '{
-    name:"eks-auto-mode-bedrock",
+    name:$name,
     configurationId:$configurationId,
     executionMode:"embedded",
     harnessAuth:{
@@ -234,6 +267,24 @@ agent_response="$("$OCC_BIN" agent create \
   --file "$GENERATED_DIR/agent.json" --output json)"
 agent_id="$(jq -er '.id // .data.id' <<<"$agent_response")"
 service_principal_id="$(jq -er '.servicePrincipalId // .data.servicePrincipalId' <<<"$agent_response")"
+
+"$OCC_BIN" agent runtime-credentials provision "$agent_id" --output json >/dev/null
+if [[ "$verify_denied" = 1 ]]; then
+  denied_output="$GENERATED_DIR/tenant-$tenant_name-denied-deploy.log"
+  if "$OCC_BIN" agent deploy "$agent_id" --output json >"$denied_output" 2>&1; then
+    die "Agent deployment succeeded before the exact Secret access binding"
+  fi
+  if ! grep -q 'HTTP 403' "$denied_output" ||
+    ! grep -q 'FORBIDDEN' "$denied_output" ||
+    ! grep -q "$service_principal_id" "$denied_output" ||
+    ! grep -q "$secret_id" "$denied_output"; then
+    cat "$denied_output" >&2
+    die "pre-binding deployment did not return the expected exact-resource HTTP 403"
+  fi
+  rm -f -- "$denied_output"
+  printf 'Verified HTTP 403 before granting Agent %s access to Secret %s.\n' \
+    "$agent_id" "$secret_id"
+fi
 
 role_response="$("$OCC_BIN" iam role create \
   --file "$SAMPLE_DIR/oce/model-secret-role.json" --output json)"
@@ -249,30 +300,67 @@ jq -n \
     resourceKind:"secret",
     resourceId:$secretId
   }' > "$GENERATED_DIR/model-secret-binding.json"
-"$OCC_BIN" iam access-binding create \
-  --file "$GENERATED_DIR/model-secret-binding.json" --output json >/dev/null
+binding_response="$("$OCC_BIN" iam access-binding create \
+  --file "$GENERATED_DIR/model-secret-binding.json" --output json)"
+binding_id="$(jq -er '.id // .data.id' <<<"$binding_response")"
+stored_binding="$("$OCC_BIN" iam access-binding get "$binding_id" --output json)"
+jq -e \
+  --arg namespaceId "$namespace_id" \
+  --arg subjectId "$service_principal_id" \
+  --arg roleId "$role_id" \
+  --arg secretId "$secret_id" \
+  '
+    (.namespaceId // .data.namespaceId) == $namespaceId and
+    (.subjectKind // .data.subjectKind) == "identity" and
+    (.subjectId // .data.subjectId) == $subjectId and
+    (.roleId // .data.roleId) == $roleId and
+    (.resourceKind // .data.resourceKind) == "secret" and
+    (.resourceId // .data.resourceId) == $secretId
+  ' <<<"$stored_binding" >/dev/null ||
+  die "stored access binding does not match the exact Agent and Secret"
 
-"$OCC_BIN" agent runtime-credentials provision "$agent_id" --output json >/dev/null
 revision_response="$("$OCC_BIN" agent deploy "$agent_id" --output json)"
 revision_id="$(jq -er '.id // .data.id' <<<"$revision_response")"
 
 jq -n \
+  --arg tenantName "$tenant_name" \
+  --arg agentName "$agent_name" \
   --arg namespaceId "$namespace_id" \
   --arg tenantNamespace "$tenant_namespace" \
   --arg gatewayNamespace "$gateway_namespace" \
   --arg configurationId "$configuration_id" \
   --arg secretId "$secret_id" \
   --arg agentId "$agent_id" \
+  --arg servicePrincipalId "$service_principal_id" \
   --arg revisionId "$revision_id" \
+  --arg roleId "$role_id" \
+  --arg bindingId "$binding_id" \
+  --argjson verifiedDeniedBeforeBinding "$verify_denied" \
   '{
+    tenantName:$tenantName,
+    agentName:$agentName,
     namespaceId:$namespaceId,
     tenantNamespace:$tenantNamespace,
     gatewayNamespace:$gatewayNamespace,
     configurationId:$configurationId,
     secretId:$secretId,
     agentId:$agentId,
-    revisionId:$revisionId
-  }' > "$GENERATED_DIR/agent-state.json"
-chmod 600 "$GENERATED_DIR/agent-state.json"
+    servicePrincipalId:$servicePrincipalId,
+    revisionId:$revisionId,
+    roleId:$roleId,
+    bindingId:$bindingId,
+    binding:{
+      id:$bindingId,
+      namespaceId:$namespaceId,
+      subjectKind:"identity",
+      subjectId:$servicePrincipalId,
+      roleId:$roleId,
+      resourceKind:"secret",
+      resourceId:$secretId
+    },
+    verifiedDeniedBeforeBinding:($verifiedDeniedBeforeBinding == 1)
+  }' > "$state_file"
+chmod 600 "$state_file"
 
-printf 'Agent %s deployed as revision %s.\n' "$agent_id" "$revision_id"
+printf 'Tenant %s Agent %s deployed as revision %s. State: %s\n' \
+  "$tenant_name" "$agent_id" "$revision_id" "$state_file"

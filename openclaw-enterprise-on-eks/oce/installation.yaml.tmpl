@@ -35,6 +35,12 @@ drivers:
         namespace:
           quota:
             pods: "10"
+            requests.cpu: "4"
+            requests.memory: 8Gi
+            limits.cpu: "8"
+            limits.memory: 16Gi
+            persistentvolumeclaims: "10"
+            requests.storage: 100Gi
           containerDefaults:
             requests: {cpu: 100m, memory: 256Mi}
             limits: {cpu: "2", memory: 2Gi}
