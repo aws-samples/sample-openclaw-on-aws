@@ -1,0 +1,32 @@
+images:
+  controller: __CONTROLLER_IMAGE__
+installation:
+  name: OCE EKS Auto Mode sample
+auth:
+  baseUrl: http://127.0.0.1:3000
+bootstrap:
+  adminEmail: admin@development.openclaw.invalid
+  password:
+    claimName: bootstrap-password
+database:
+  cidrs:
+    - __POSTGRES_POD_IP__/32
+cluster:
+  cidrs:
+    - __KUBERNETES_SERVICE_IP__/32
+  port: 443
+api:
+  clients:
+    - namespace: openclaw-system
+      podLabels:
+        app.kubernetes.io/name: occ-auto-client
+controlPlane:
+  nodeSelector:
+    oce-role: control
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 1Gi

@@ -1,0 +1,17 @@
+apiVersion: eks.amazonaws.com/v1
+kind: NodeClass
+metadata:
+  name: oce-private
+spec:
+  role: __NODE_ROLE_NAME__
+  subnetSelectorTerms:
+__PRIVATE_SUBNET_TERMS__
+  securityGroupSelectorTerms:
+    - id: __CLUSTER_SECURITY_GROUP_ID__
+  ephemeralStorage:
+    size: 80Gi
+    iops: 3000
+    throughput: 125
+  networkPolicy: DefaultAllow
+  networkPolicyEventLogs: Disabled
+  snatPolicy: Random
