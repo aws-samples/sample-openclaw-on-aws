@@ -160,6 +160,44 @@ When a Bedrock key expires, update the existing OCE Secret and deploy a new
 Agent revision. Restarting a Pod does not refresh the credential snapshot in an
 existing revision.
 
+## Back up the sample database
+
+1. Create a logical backup before upgrades, configuration changes, or
+   destructive tests.
+
+   ```bash
+   ./scripts/backup-postgres-dev.sh
+   ```
+
+   The helper creates `.generated/backups/` with mode `0700`, uses `mktemp` for
+   a unique temporary filename, and writes a permission-restricted plaintext,
+   mode-`0600`, custom-format `pg_dump` archive. It runs `pg_dump` and
+   `pg_restore --list` in the explicit `postgres` container of `postgres-0`,
+   then checks that `pg_restore` can read the archive catalog.
+
+2. *(Optional)* Upload the checked archive to an existing S3 URI.
+
+   Set `POSTGRES_BACKUP_S3_URI` to an `s3://` URI ending in `/`, set the
+   expected bucket-owner account ID, and set an AWS KMS key. The helper creates
+   none of these resources. It checks the expected bucket owner, uploads a
+   uniquely named object with SSE-KMS, refuses to overwrite an existing object,
+   then checks the stored size and encryption.
+
+   ```bash
+   POSTGRES_BACKUP_S3_URI=s3://your-backup-bucket/openclaw-enterprise/ \
+   POSTGRES_BACKUP_S3_EXPECTED_BUCKET_OWNER=111122223333 \
+   POSTGRES_BACKUP_KMS_KEY_ID=alias/your-backup-key \
+     ./scripts/backup-postgres-dev.sh
+   ```
+
+The archive captures the OCE database contents. The `pg_restore --list` check
+does not validate a full restore. The helper does not provide automatic
+failover or point-in-time recovery. Use a managed PostgreSQL design with
+automated backups and tested restore procedures for production workloads.
+Treat local archives as sensitive data. Encrypt or securely remove them after
+copying them to durable storage. Remove abandoned `.postgres-backup.*` files
+after confirming that no backup process is running.
+
 ## Validate the deployment
 
 1. Run the non-destructive cluster and control-plane checks.

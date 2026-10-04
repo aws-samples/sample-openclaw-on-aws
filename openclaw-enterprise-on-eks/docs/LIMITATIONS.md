@@ -3,7 +3,13 @@
 - The first-deployment validation creates one embedded Agent. Second-tenant
   onboarding verifies the pre-binding Secret denial, but the sample does not
   load test concurrent users or large-scale scheduling.
-- PostgreSQL runs as one in-cluster Pod without TLS, backups, or failover.
+- PostgreSQL runs as one in-cluster Pod without TLS. The operator-run
+  `scripts/backup-postgres-dev.sh` helper creates a permission-restricted
+  plaintext custom-format `pg_dump`, checks its archive catalog with
+  `pg_restore --list`, and can upload it to an existing S3 URI with an
+  expected-owner check, SSE-KMS, no-overwrite condition, and post-upload size
+  and encryption checks. It does not provide automatic failover, point-in-time
+  recovery, or a validated full restore.
 - The OCE API and worker each run one replica.
 - The sample configures no HorizontalPodAutoscaler or PodDisruptionBudget.
   Auto Mode provisions and replaces nodes but does not scale application

@@ -47,6 +47,26 @@ patch, and delete namespaces. This is not `cluster-admin`, but namespace
 deletion has a large blast radius. Run OCE in a dedicated cluster or apply
 additional admission controls after confirming they do not break reconciliation.
 
+## Backup handling
+
+`scripts/backup-postgres-dev.sh` stores permission-restricted plaintext
+custom-format `pg_dump` archives in a mode-`0700` local directory and sets each
+completed archive to mode `0600`. It uses unique `mktemp` filenames and selects
+the `postgres` container explicitly for `pg_dump` and `pg_restore`. Treat these
+files as sensitive data.
+
+If `POSTGRES_BACKUP_S3_URI` names an existing S3 URI ending in `/`, the helper
+requires the expected bucket-owner account ID and an AWS KMS key. It checks the
+expected owner, refuses to overwrite an existing object, uploads with SSE-KMS,
+and checks the stored size and encryption. It does not create the bucket or
+replace bucket access controls, retention, versioning, or lifecycle policies.
+
+The helper runs `pg_restore --list` to check that `pg_restore` can read the
+archive catalog. This check is not a validated full restore. The helper does
+not provide automatic failover or point-in-time recovery. Restrict `pods/exec`
+access because it permits operators to read the database, and test restores in
+an isolated environment.
+
 For production, replace the in-cluster database and manual credential workflow
 with reviewed high-availability, backup, private-routing, secret-rotation,
 monitoring, and incident-response designs.

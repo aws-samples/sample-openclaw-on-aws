@@ -42,7 +42,7 @@ consumer determines the EBS Availability Zone.
 | Data | Claim size | Behaviour |
 |---|---:|---|
 | Bootstrap output | 1 GiB | Holds the initial administrator service key; not mounted by steady-state OCE Pods |
-| Development PostgreSQL | 5 GiB | Single-Pod database with no backup or failover |
+| Development PostgreSQL | 5 GiB | Single-Pod database; the sample includes an operator-run logical dump helper |
 | Agent gateway state and embedded workspace | 10 GiB per Agent | Survives Pod and normal node replacement while the PVC and EBS volume remain |
 
 An EBS volume is single-AZ. A replacement Pod must run on a node in the volume's
@@ -56,8 +56,15 @@ forcing a replacement writer.
 
 The StorageClasses use `reclaimPolicy: Delete`. Agent deletion can therefore
 delete its volume, and cluster deletion can leave volumes that need manual
-review. EBS persistence is not a backup. Add snapshots, restore tests, and a
-managed multi-AZ PostgreSQL design before storing durable data.
+review. EBS persistence is not a backup. Run
+`scripts/backup-postgres-dev.sh` before destructive tests. The helper creates a
+permission-restricted plaintext custom-format `pg_dump`, checks that
+`pg_restore --list` can read its archive catalog, and can upload it to an
+existing S3 URI with an expected-owner check, SSE-KMS, no-overwrite condition,
+and post-upload size and encryption checks. It does not provide automatic
+failover, point-in-time recovery, or a validated full restore. Add tested
+restore procedures and a managed multi-AZ PostgreSQL design before storing
+durable data.
 
 See [EKS Auto Mode storage classes](https://docs.aws.amazon.com/eks/latest/userguide/create-storage-class.html).
 

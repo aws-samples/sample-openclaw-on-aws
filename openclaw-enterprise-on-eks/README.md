@@ -18,12 +18,20 @@ Use this sample to evaluate:
 - Encrypted gp3 EBS storage with `WaitForFirstConsumer`.
 - OCE NetworkPolicies plus the node-local DNS rule required by Auto Mode.
 - Pod and node replacement with persistent gateway state.
+- Operator-run PostgreSQL backups with `scripts/backup-postgres-dev.sh` as
+  permission-restricted plaintext custom-format `pg_dump` archives, with
+  optional no-overwrite SSE-KMS upload to an existing S3 URI after checking
+  the expected bucket owner.
 
 The sample is not a production architecture or a scale test. It uses a
 single-Pod PostgreSQL database, one OCE API replica, one worker replica,
 manually rotated Bedrock bearer tokens, and local port-forwarding. Replace these
 parts with reviewed high-availability, private-routing, credential-rotation,
 backup, and observability designs.
+
+The script checks each archive catalog with `pg_restore --list` and checks the
+uploaded object's size and encryption. It does not provide automatic failover,
+point-in-time recovery, or a validated full restore.
 
 Read [Security considerations](docs/SECURITY.md) before deployment. The
 validation previously found critical Debian package findings for which the
@@ -39,7 +47,7 @@ Mode nodes are immutable.
 ## Quick start
 
 1. Follow [Operations](docs/OPERATIONS.md) to build and publish images, deploy
-   the cluster and OCE, and create the first Agent.
+   the cluster and OCE, create the first Agent, and back up the sample database.
 2. Follow [Tenant isolation](docs/TENANT_ISOLATION.md) to onboard a second
    tenant, verify HTTP 403 before its Agent-to-Secret binding is granted, and
    configure separate user-to-Namespace and user-to-Agent AccessBindings.
