@@ -10,7 +10,7 @@
 #   https://raw.githubusercontent.com/strands-agents/box/main/.agents/skills/authoring-box-policy/SKILL.md
 
 name = "openclaw"
-box_dir = "<HOME>/strands-box-poc/state"
+box_dir = "<HOME>/strands-box/state"
 policy = "policy.dw"
 
 [agent]
@@ -25,12 +25,12 @@ command = [
   "--auth", "token",
   "--token", "<GATEWAY_TOKEN>",
 ]
-workspace = "<HOME>/strands-box-poc/workspace"
+workspace = "<HOME>/strands-box/workspace"
 # Nothing comes from your shell env except what's listed here, plus what Box
 # itself injects (HTTPS_PROXY for the egress gateway, credentials below).
 env = {
-  OPENCLAW_STATE_DIR = "<HOME>/strands-box-poc/state-openclaw",
-  HOME = "<HOME>/strands-box-poc/home",
+  OPENCLAW_STATE_DIR = "<HOME>/strands-box/state-openclaw",
+  HOME = "<HOME>/strands-box/home",
   PATH = "/usr/bin:/bin",
   NODE_ENV = "production",
 }
@@ -40,8 +40,8 @@ env = {
 # and persist state; everything else should go through policy below.
 [agent.filesystem]
 read = ["<NODE_MODULES>/openclaw"]
-write = ["<HOME>/strands-box-poc/state-openclaw", "<HOME>/strands-box-poc/home"]
-list = ["<HOME>/strands-box-poc/workspace"]
+write = ["<HOME>/strands-box/state-openclaw", "<HOME>/strands-box/home"]
+list = ["<HOME>/strands-box/workspace"]
 
 # Credential injection: the gateway process never sees the raw Bedrock
 # bearer token. Box signs/injects it only on requests to this exact host.

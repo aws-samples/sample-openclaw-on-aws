@@ -22,13 +22,13 @@ when { context.input.host in ["discord.com", "gateway.discord.gg"] };
 @id("workspace_read")
 permit (principal, action == Box::Action::"fs:read", resource)
 when {
-  context.input.path == "~/strands-box-poc/workspace" ||
-  context.input.path like "~/strands-box-poc/workspace/*"
+  context.input.path == "~/strands-box/workspace" ||
+  context.input.path like "~/strands-box/workspace/*"
 };
 
 @id("workspace_write")
 permit (principal, action == Box::Action::"fs:write", resource)
-when { context.input.path like "~/strands-box-poc/workspace/*" };
+when { context.input.path like "~/strands-box/workspace/*" };
 
 // --- Residual-risk mitigation: temporal chaining ------------------------
 // This is the thing OpenClaw's own in-process argv filtering cannot do:
@@ -44,7 +44,7 @@ when temporal {
   exists (t: Timepoint). (
     formerly within 1h (
       Box::Action::"fs:read"::response{ input.path: p, output.result: Box::FsResponseResult::"completed" }
-      && p like "~/strands-box-poc/workspace/secrets/*"
+      && p like "~/strands-box/workspace/secrets/*"
       && tp(t)
     )
   )
