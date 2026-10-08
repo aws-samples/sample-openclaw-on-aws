@@ -1,4 +1,4 @@
-// Strands Box PoC policy for an OpenClaw gateway.
+// Strands Box policy for an OpenClaw gateway.
 // Default-deny: anything with no matching `permit` below is refused.
 
 // --- Model + channel traffic -------------------------------------------

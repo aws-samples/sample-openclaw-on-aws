@@ -1,10 +1,10 @@
-# Strands Box PoC: run the OpenClaw gateway under an OS-enforced sandbox.
+# Strands Box: run the OpenClaw gateway under an OS-enforced sandbox.
 #
 # SCOPE: this secures a LOCAL OpenClaw gateway process on a dev Mac. Box is
 # macOS-Apple-Silicon-only (Preview) as of 2026-10; it has no Linux support,
 # so this does NOT apply to the agentcore-runtime-instances production
 # deployment (Linux/arm64 EC2) in this repo. Treat this as a dev-workstation
-# hardening PoC, not a production control, until Box ships Linux support.
+# hardening measure, not a production control, until Box ships Linux support.
 #
 # To author/change the policy, give your coding agent this skill:
 #   https://raw.githubusercontent.com/strands-agents/box/main/.agents/skills/authoring-box-policy/SKILL.md
