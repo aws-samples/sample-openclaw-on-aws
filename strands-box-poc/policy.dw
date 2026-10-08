@@ -1,0 +1,61 @@
+// Strands Box PoC policy for an OpenClaw gateway.
+// Default-deny: anything with no matching `permit` below is refused.
+
+// --- Model + channel traffic -------------------------------------------
+@id("bedrock_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host == "bedrock-runtime.us-east-1.amazonaws.com" && context.input.port == 443 };
+
+@id("bedrock_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host == "bedrock-runtime.us-east-1.amazonaws.com" };
+
+@id("discord_connect")
+permit (principal, action == Box::Action::"net:connect", resource)
+when { context.input.host in ["discord.com", "gateway.discord.gg"] && context.input.port == 443 };
+
+@id("discord_request")
+permit (principal, action == Box::Action::"http:request", resource)
+when { context.input.host in ["discord.com", "gateway.discord.gg"] };
+
+// --- Workspace file access ----------------------------------------------
+@id("workspace_read")
+permit (principal, action == Box::Action::"fs:read", resource)
+when {
+  context.input.path == "~/strands-box-poc/workspace" ||
+  context.input.path like "~/strands-box-poc/workspace/*"
+};
+
+@id("workspace_write")
+permit (principal, action == Box::Action::"fs:write", resource)
+when { context.input.path like "~/strands-box-poc/workspace/*" };
+
+// --- Residual-risk mitigation: temporal chaining ------------------------
+// This is the thing OpenClaw's own in-process argv filtering cannot do:
+// if the agent has read anything under a `secrets/` subtree in the last
+// hour, deny every subsequent outbound HTTP request, full stop -- even to
+// an otherwise-allowed destination. Mirrors the read-then-exfiltrate
+// pattern flagged as a residual prompt-injection risk in this repo's
+// MULTI_TENANCY_CONSIDERATIONS.md.
+@id("no_egress_after_secret_read")
+@description("A file under secrets/ was read recently; outbound requests are blocked until that window passes.")
+forbid (principal, action == Box::Action::"http:request", resource)
+when temporal {
+  exists (t: Timepoint). (
+    formerly within 1h (
+      Box::Action::"fs:read"::response{ input.path: p, output.result: Box::FsResponseResult::"completed" }
+      && p like "~/strands-box-poc/workspace/secrets/*"
+      && tp(t)
+    )
+  )
+};
+
+// --- Explicit shell/program denials -------------------------------------
+// Mirrors OpenClaw's own exec allowlist hardening as a second, OS-level
+// enforcement layer. Confirm with upstream whether OpenClaw's exec tool can
+// be pointed at Box's shell interpreter for full per-command coverage --
+// until then, this governs only the gateway process's own filesystem/net
+// calls, not every subprocess OpenClaw's exec tool spawns.
+@id("no_git_config")
+forbid (principal, action == Box::Action::"shell:spawn", resource)
+when { context.input.argv0 == "git" && context.input.args like "*config*" };

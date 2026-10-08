@@ -1,0 +1,54 @@
+# Strands Box PoC: run the OpenClaw gateway under an OS-enforced sandbox.
+#
+# SCOPE: this secures a LOCAL OpenClaw gateway process on a dev Mac. Box is
+# macOS-Apple-Silicon-only (Preview) as of 2026-10; it has no Linux support,
+# so this does NOT apply to the agentcore-runtime-instances production
+# deployment (Linux/arm64 EC2) in this repo. Treat this as a dev-workstation
+# hardening PoC, not a production control, until Box ships Linux support.
+#
+# To author/change the policy, give your coding agent this skill:
+#   https://raw.githubusercontent.com/strands-agents/box/main/.agents/skills/authoring-box-policy/SKILL.md
+
+name = "openclaw"
+box_dir = "<HOME>/strands-box-poc/state"
+policy = "policy.dw"
+
+[agent]
+# OpenClaw's gateway, bound to loopback only, auth required. Replace the node
+# path with `which node` / `which openclaw` on your machine -- Box needs
+# absolute paths, it does not inherit your shell's PATH.
+command = [
+  "<HOME>/.nvm/versions/node/v24.19.0/bin/node",
+  "<NODE_MODULES>/openclaw/bin/openclaw.js",
+  "gateway",
+  "--bind", "loopback",
+  "--auth", "token",
+  "--token", "<GATEWAY_TOKEN>",
+]
+workspace = "<HOME>/strands-box-poc/workspace"
+# Nothing comes from your shell env except what's listed here, plus what Box
+# itself injects (HTTPS_PROXY for the egress gateway, credentials below).
+env = {
+  OPENCLAW_STATE_DIR = "<HOME>/strands-box-poc/state-openclaw",
+  HOME = "<HOME>/strands-box-poc/home",
+  PATH = "/usr/bin:/bin",
+  NODE_ENV = "production",
+}
+
+# Direct OS-enforced grants -- these never produce a Dogwood decision, the
+# kernel enforces them. Keep this list as narrow as the gateway needs to boot
+# and persist state; everything else should go through policy below.
+[agent.filesystem]
+read = ["<NODE_MODULES>/openclaw"]
+write = ["<HOME>/strands-box-poc/state-openclaw", "<HOME>/strands-box-poc/home"]
+list = ["<HOME>/strands-box-poc/workspace"]
+
+# Credential injection: the gateway process never sees the raw Bedrock
+# bearer token. Box signs/injects it only on requests to this exact host.
+[egress.model]
+destinations = ["bedrock-runtime.us-east-1.amazonaws.com"]
+secret.ref = "env://AWS_BEARER_TOKEN_BEDROCK"
+
+# Discord channel adapter needs these hosts; nothing else gets outbound.
+[egress.discord]
+destinations = ["discord.com", "gateway.discord.gg"]
